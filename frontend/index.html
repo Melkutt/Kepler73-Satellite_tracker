@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kepler73</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="/css/style.css"/>
+</head>
+<body>
+
+<!-- ── Menu bar ─────────────────────────────────────────── -->
+<nav id="menubar">
+  <div class="menu-brand">🛰 Kepler73</div>
+
+  <div class="menu-group">
+    <button class="menu-btn" onclick="toggleMenu('menu-modules')">Modules ▾</button>
+    <div class="dropdown" id="menu-modules">
+      <a onclick="showNewModuleDialog()">➕ New module</a>
+      <a onclick="showRenameDialog()">✏ Rename</a>
+      <a onclick="deleteActiveModule()">🗑 Delete active</a>
+      <hr>
+      <div id="module-list-menu"></div>
+    </div>
+  </div>
+
+  <div class="menu-group">
+    <button class="menu-btn" onclick="toggleMenu('menu-satellites')">Satellites ▾</button>
+    <div class="dropdown" id="menu-satellites">
+      <a onclick="showSearchDialog()">🔍 Search & add</a>
+      <a onclick="showSatnogsDialog()">🔎 SatNOGS lookup</a>
+      <a onclick="refreshAllTLE()">🔄 Update all TLEs</a>
+      <hr>
+      <a onclick="exportTLE(false)">⬇ Export TLEs (this module)</a>
+      <a onclick="exportTLE(true)">⬇ Export TLEs (all modules)</a>
+      <hr>
+      <a onclick="removeSelectedSat()">🗑 Remove selected</a>
+    </div>
+  </div>
+
+  <div class="menu-group">
+    <button class="menu-btn" onclick="toggleMenu('menu-map')">Map ▾</button>
+    <div class="dropdown" id="menu-map">
+      <a onclick="setLayer('osm')">🗺 Map view (OSM)</a>
+      <a onclick="setLayer('satellite')">🛰 Satellite view (Esri)</a>
+      <hr>
+      <a onclick="resetView()">⊙ Global view</a>
+      <a onclick="zoomToSelected()">📍 Zoom to selected</a>
+    </div>
+  </div>
+
+  <div class="menu-group">
+    <button class="menu-btn" onclick="toggleMenu('menu-settings')">Settings ▾</button>
+    <div class="dropdown" id="menu-settings">
+      <a onclick="showSettingsDialog()">⚙ Observer & location</a>
+      <hr>
+      <a onclick="quitApp()" style="color:#ef5350">⏻ Quit Kepler73</a>
+    </div>
+  </div>
+
+  <!-- Status right -->
+  <div class="menu-right">
+    <button id="btn-mute" class="mute-btn" onclick="toggleMute()" title="Toggle alarm sound">🔊</button>
+    <span id="status-online" class="status-dot offline">◉ CHECKING</span>
+    <span id="status-clock" class="status-clock">--:--:-- UTC</span>
+  </div>
+</nav>
+
+<!-- ── Alarm banner ──────────────────────────────────────────── -->
+<div id="alarm-banner" class="alarm-banner hidden">
+  <span id="alarm-text">⚠ PASS ALERT</span>
+  <button onclick="dismissAlarm()">✕</button>
+</div>
+
+<!-- ── Main layout ───────────────────────────────────────── -->
+<div id="app">
+
+  <!-- Left panel -->
+  <div id="sidebar">
+    <div class="panel-header">
+      <span>ACTIVE MODULE</span>
+    </div>
+    <div id="module-name">—</div>
+
+    <div class="panel-header" style="margin-top:8px">
+      <span>SATELLITES</span>
+      <button class="icon-btn" onclick="showSearchDialog()" title="Add satellite">＋</button>
+    </div>
+    <div id="sat-list"></div>
+
+    <div class="panel-header" style="margin-top:8px">
+      <span>POLAR VIEW</span>
+    </div>
+    <div id="polar-container">
+      <canvas id="polar-canvas" width="220" height="220"></canvas>
+      <div id="polar-hint">Select a satellite to show pass</div>
+    </div>
+
+    <!-- Pass Simulator -->
+    <div class="panel-header" style="margin-top:8px">
+      <span>PASS SIMULATOR</span>
+      <button id="sim-activate-btn" onclick="simToggleActive()" style="font-size:9px;padding:1px 6px;background:var(--select);color:var(--fg);border:1px solid var(--border);cursor:pointer;border-radius:2px;margin-left:auto">▶ Activate</button>
+    </div>
+    <div id="sim-container" class="sim-inactive">
+      <div id="sim-date-row">
+        <input type="date" id="sim-date-input" onchange="simDayChanged()" title="Date to simulate (UTC)">
+        <input type="time" id="sim-time-input" value="12:00" onchange="simTimeChanged()">
+        <button id="sim-find-btn" onclick="simFindPass()" title="Find pass">🔍</button>
+      </div>
+      <div id="sim-info">Select satellite and date</div>
+      <div id="sim-controls" style="display:none">
+        <input type="range" id="sim-slider" min="0" max="100" value="0" oninput="simSliderMove()">
+        <div id="sim-time-display">--:--:--</div>
+        <div id="sim-azel-display">AZ: ---  EL: ---</div>
+        <div style="display:flex;gap:4px">
+          <button id="sim-play-btn" onclick="simTogglePlay()">▶ Play</button>
+          <button id="sim-save-btn" onclick="savePassToFile()" style="display:none">💾 Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Map -->
+  <div id="map-container">
+    <div id="map"></div>
+
+    <!-- Map layer buttons -->
+    <div id="layer-btns">
+      <button id="btn-osm" class="layer-btn" onclick="setLayer('osm')">🗺 Map</button>
+      <button id="btn-sat" class="layer-btn active" onclick="setLayer('satellite')">🛰 Satellite</button>
+      <button class="layer-btn" onclick="resetView()">⊙ Global</button>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Status bar ────────────────────────────────────────── -->
+<div id="statusbar">
+  <span id="sb-module">No module</span>
+  <span id="sb-sats">0 satellites</span>
+  <span id="sb-selected"></span>
+  <span id="sb-notice" style="display:none"></span>
+  <span style="margin-left:auto" id="sb-version">Kepler73 v0.3 – SA1CKW</span>
+  <button id="sb-quit" onclick="quitApp()" title="Shut down Kepler73">⏻ Quit</button>
+</div>
+
+<!-- ── Dialogs ───────────────────────────────────────────── -->
+
+<!-- New module -->
+<div class="modal-bg" id="dlg-new-module">
+  <div class="modal">
+    <h3>➕ New module</h3>
+    <input type="text" id="new-module-name" placeholder="Module name" autocomplete="off">
+    <div class="modal-btns">
+      <button class="btn-primary" onclick="createModule()">Create</button>
+      <button class="btn-cancel" onclick="closeDialog('dlg-new-module')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Rename -->
+<div class="modal-bg" id="dlg-rename">
+  <div class="modal">
+    <h3>✏ Rename module</h3>
+    <input type="text" id="rename-input" placeholder="New name" autocomplete="off">
+    <div class="modal-btns">
+      <button class="btn-primary" onclick="renameModule()">Save</button>
+      <button class="btn-cancel" onclick="closeDialog('dlg-rename')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Search satellite -->
+<div class="modal-bg" id="dlg-search">
+  <div class="modal modal-wide">
+    <h3>🔍 Add satellite</h3>
+    <p class="hint">Search Celestrak by name or NORAD-ID (digits only)</p>
+    <div class="search-row">
+      <input type="text" id="search-input" placeholder="e.g. NOAA 19 or 33591"
+             autocomplete="off" onkeydown="if(event.key==='Enter') doSearch()">
+      <button class="btn-primary" onclick="doSearch()">Search</button>
+    </div>
+
+    <details class="tle-import">
+      <summary>📁 Load from file / paste (TLE, 3LE, GP JSON or CSV)</summary>
+      <div class="search-row">
+        <input type="file" id="tle-file-input" accept=".txt,.tle,.json,.csv">
+        <button class="btn-primary" onclick="importTleFile()">Load</button>
+      </div>
+      <textarea id="tle-paste" rows="4"
+                placeholder="…or paste element sets here"></textarea>
+    </details>
+
+    <div id="search-status" class="hint"></div>
+    <div id="search-results"></div>
+    <div class="modal-btns">
+      <button class="btn-primary" onclick="addSelectedSat()">✅ Add selected</button>
+      <button class="btn-cancel" onclick="closeDialog('dlg-search')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings -->
+<div class="modal-bg" id="dlg-settings">
+  <div class="modal modal-wide">
+    <h3>⚙ Observer settings</h3>
+    <div class="settings-grid">
+      <label>Latitude (°N)</label>
+      <input type="number" id="cfg-lat" step="0.0001">
+      <label>Longitude (°E)</label>
+      <input type="number" id="cfg-lon" step="0.0001">
+      <label>Altitude (m)</label>
+      <input type="number" id="cfg-alt" step="1">
+      <label>Min. elevation (°)</label>
+      <input type="number" id="cfg-min-el" step="0.5">
+      <label>Alarm (min before AOS)</label>
+      <input type="number" id="cfg-alarm-min" step="1" min="1" max="60">
+      <label>Alarm sound</label>
+      <select id="cfg-alarm-sound">
+        <option value="cw_aos">CW - AOS in morse code</option>
+        <option value="three_beeps">Three short beeps</option>
+        <option value="rising">Rising tone (radar)</option>
+        <option value="long_beep">One long beep</option>
+      </select>
+      <label>Show debris (DEB)</label>
+      <input type="checkbox" id="cfg-show-deb" style="width:auto;margin-top:6px">
+      <label>TLE source</label>
+      <select id="cfg-tle-source">
+        <option value="celestrak">Celestrak (online)</option>
+        <option value="file">Local file (offline)</option>
+        <option value="file_then_celestrak">Local file, then Celestrak</option>
+      </select>
+      <label>TLE file / folder</label>
+      <input type="text" id="cfg-tle-file"
+             placeholder="path to a .txt/.tle/.json/.csv file or a folder">
+    </div>
+
+    <div class="loc-picker">
+      <div class="search-row">
+        <input type="text" id="loc-search" placeholder="Search place, e.g. Stånga"
+               autocomplete="off"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();locSearch();}">
+        <button class="btn-primary" type="button" onclick="locSearch()">Find</button>
+      </div>
+      <div id="loc-search-results"></div>
+      <div id="loc-map"></div>
+      <div class="hint">Click the map or drag the pin to set your position.
+        Ground elevation is filled in automatically —
+        <b>add the height of your antenna above the ground</b> to that value.</div>
+    </div>
+
+    <div class="modal-btns">
+      <button class="btn-primary" onclick="saveSettings()">💾 Save</button>
+      <button class="btn-cancel" onclick="closeDialog('dlg-settings')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- SatNOGS lookup -->
+<div class="modal-bg" id="dlg-satnogs">
+  <div class="modal modal-xwide">
+    <h3>🔎 SatNOGS lookup</h3>
+
+    <div class="sn-toolbar">
+      <button class="btn-primary" type="button" onclick="satnogsFetch(false)">Load catalog</button>
+      <button class="btn-cancel" type="button" onclick="satnogsFetch(true)"
+              title="Re-download the SatNOGS lists">↻ Refresh</button>
+      <span id="sn-status" class="hint"></span>
+    </div>
+
+    <div class="sn-filters">
+      <div class="sn-row">
+        <input type="text" id="sn-search" placeholder="Search name / description / NORAD / country"
+               autocomplete="off">
+        <label>Freq <input type="number" id="sn-fmin" step="0.001" placeholder="min MHz"></label>
+        <label>– <input type="number" id="sn-fmax" step="0.001" placeholder="max MHz"></label>
+        <label>Geo
+          <select id="sn-geo">
+            <option value="">all</option>
+            <option value="only">only</option>
+            <option value="hide">hide</option>
+          </select>
+        </label>
+        <label><input type="checkbox" id="sn-geovis"> GEO above my horizon</label>
+        <label><input type="checkbox" id="sn-down" checked> ↓ Downlink</label>
+        <label><input type="checkbox" id="sn-up" checked> ↑ Uplink</label>
+        <label><input type="checkbox" id="sn-active"> Active only</label>
+        <button class="btn-cancel" type="button" onclick="satnogsClear()">Clear filters</button>
+      </div>
+      <div class="sn-facets">
+        <div class="sn-facet"><div class="sn-facet-h">Modulation</div><div id="sn-f-mode" class="sn-chips"></div></div>
+        <div class="sn-facet"><div class="sn-facet-h">Service</div><div id="sn-f-service" class="sn-chips"></div></div>
+        <div class="sn-facet"><div class="sn-facet-h">Type</div><div id="sn-f-type" class="sn-chips"></div></div>
+        <div class="sn-facet"><div class="sn-facet-h">Country</div><div id="sn-f-country" class="sn-chips"></div></div>
+      </div>
+    </div>
+
+    <div class="sn-table-wrap">
+      <table class="sn-table">
+        <thead><tr>
+          <th>NORAD</th><th>Name</th><th>Dir</th><th>MHz</th><th>Mode</th>
+          <th>Service</th><th>Type</th><th>Status</th><th>QTH el</th><th></th>
+        </tr></thead>
+        <tbody id="sn-tbody"></tbody>
+      </table>
+    </div>
+
+    <div class="modal-btns" style="justify-content:space-between">
+      <span id="sn-count" class="hint"></span>
+      <button class="btn-cancel" onclick="closeDialog('dlg-satnogs')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Right slide-in panel ──────────────────────────────────── -->
+<div id="right-panel">
+  <div id="right-panel-overlay" onclick="closeRightPanel()"></div>
+  <div id="right-panel-content">
+    <div class="panel-header">
+      <span id="rp-title">SATELLITE INFO</span>
+      <button class="icon-btn" onclick="refreshTransponders()" title="Refresh from SatNOGS">↻</button>
+    </div>
+    <div id="rp-sat-name" class="rp-sat-name">—</div>
+
+    <div class="panel-header" style="margin-top:8px">
+      <span>TRANSPONDERS</span>
+    </div>
+    <div id="transponder-list"><span class="hint-text">Loading...</span></div>
+
+    <div class="panel-header" style="margin-top:8px">
+      <span>NEXT PASS</span>
+    </div>
+    <div id="rp-pass-info" class="rp-pass-info">—</div>
+  </div>
+</div>
+
+<!-- ── Transponder detail dialog ─────────────────────────────── -->
+<div class="modal-bg" id="dlg-transponder">
+  <div class="modal modal-wide">
+    <h3>📡 <span id="tx-dlg-title">Transponder</span></h3>
+    <div id="tx-dlg-content"></div>
+    <div class="modal-btns">
+      <button class="btn-cancel" onclick="closeDialog('dlg-transponder')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Scripts -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script src="/js/map.js?v=10"></script>
+<script src="/js/sidebar.js?v=12"></script>
+<script src="/js/websocket.js?v=7"></script>
+<script src="/js/ui.js?v=15"></script>
+<script src="/js/polarmap.js?v=7"></script>
+<script src="/js/transponder.js?v=7"></script>
+<script src="/js/simulator.js?v=3"></script>
+<script src="/js/satnogs.js?v=4"></script>
+
+</body>
+</html>

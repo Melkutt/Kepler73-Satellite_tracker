@@ -1,0 +1,6 @@
+# Kepler73 runtime dependencies (Python 3.11+)
+flask>=3.0
+flask-socketio>=5.3
+sgp4>=2.23
+numpy>=1.24
+pygame>=2.5
