@@ -103,11 +103,12 @@ ground elevation is filled in automatically.
 
 A pre-built Windows executable is available under [Releases](../../releases).
 
-1. Download and unzip `Kepler73-Win.zip`
-2. Double-click `Kepler73.exe`
+1. Download `Kepler73.exe`
+2. Double-click it
 3. Your browser opens automatically at `http://127.0.0.1:5000`
 
-No Python or any other software required.
+No Python or any other software required. The exe keeps its data (config,
+modules, caches) in `%USERPROFILE%\.kepler73`.
 
 ## Run from source
 
@@ -122,6 +123,15 @@ python main.py
 
 The server starts on <http://127.0.0.1:5000> and opens your browser after ~1.5 s.
 There is no build step for the frontend (plain HTML/CSS/vanilla JS).
+
+## Build the Windows executable
+
+```
+pip install -r requirements.txt pyinstaller
+build.bat            (or:  pyinstaller --clean --noconfirm kepler73.spec)
+```
+
+The single-file `dist\Kepler73.exe` is what goes on the Releases page.
 
 ---
 

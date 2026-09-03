@@ -209,3 +209,6 @@ __marimo__/
 # Kepler73 local data (config, modules, TLE/tile/geocode caches) — never publish
 data/
 .vscode/
+
+# keep the PyInstaller spec (the *.spec rule above would otherwise hide it)
+!kepler73.spec

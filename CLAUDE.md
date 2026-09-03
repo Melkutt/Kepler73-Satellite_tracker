@@ -17,6 +17,13 @@ python main.py
 Starts the server on `http://127.0.0.1:5000` and opens the default browser after ~1.5 s.
 No build step for the frontend (plain HTML/CSS/vanilla JS).
 
+**Windows exe**: `pyinstaller --clean --noconfirm kepler73.spec` (or `build.bat`) →
+`dist/Kepler73.exe` (onefile, ~35 MB). `kepler73.spec` bundles `frontend/` as data and
+hidden-imports `engineio.async_drivers.threading` + `simple_websocket` (flask-socketio
+threading mode). When frozen, `config.BASE_DIR` is `sys._MEIPASS` and `DATA_DIR` is
+`~/.kepler73`; `main.py` skips its chdir/sys.path fiddling, and `api/__init__.py` builds
+`frontend_dir` from `BASE_DIR`.
+
 - **Python**: 3.11+ (developed on 3.13). Deps in `requirements.txt`: `flask`,
   `flask-socketio`, `sgp4`, `numpy`, `pygame`. Socket.IO runs `async_mode="threading"`
   (no eventlet/gevent).

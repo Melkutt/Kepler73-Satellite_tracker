@@ -10,13 +10,15 @@ import time
 import sys
 import os
 
-# Ensure project directory is in Python path
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-if PROJECT_DIR not in sys.path:
-    sys.path.insert(0, PROJECT_DIR)
-
-# Change working directory to project root
-os.chdir(PROJECT_DIR)
+# When running from source, make sure the project root is importable and is the
+# working directory. In a PyInstaller bundle the modules are frozen in and the
+# writable data dir is an absolute path (~/.kepler73), so neither is needed –
+# and chdir'ing into the temp _MEIPASS dir would just be confusing.
+if not getattr(sys, "frozen", False):
+    PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+    if PROJECT_DIR not in sys.path:
+        sys.path.insert(0, PROJECT_DIR)
+    os.chdir(PROJECT_DIR)
 
 from api import create_app, socketio
 from backend.config import APP_VERSION, AUTHOR

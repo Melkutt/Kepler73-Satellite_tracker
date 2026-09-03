@@ -14,9 +14,10 @@ socketio = SocketIO(cors_allowed_origins="*", async_mode="threading")
 
 def create_app():
     import os
-    # Build absolute paths from the project root location
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    frontend_dir = os.path.join(project_root, "frontend")
+    # BASE_DIR is the project root when run from source, or the PyInstaller
+    # bundle dir (sys._MEIPASS) when frozen – frontend/ is bundled alongside.
+    from backend.config import BASE_DIR
+    frontend_dir = os.path.join(BASE_DIR, "frontend")
 
     app = Flask(
         __name__,
