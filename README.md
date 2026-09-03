@@ -82,6 +82,25 @@ The interface runs in your browser, but everything is computed locally. No cloud
 
 ---
 
+## Screenshots
+
+**Main view** — live map, satellite list, polar view, and the transponder / next-pass panel.
+
+![Main view](docs/img/01-main.png)
+
+**SatNOGS lookup** — faceted filtering (modulation / service / type / country / frequency /
+geostationary) over the whole SatNOGS catalogue; the ＋ button adds a satellite to the
+active module.
+
+![SatNOGS lookup](docs/img/02-satnogs-lookup.png)
+
+**Observer settings** — set your location by dragging the pin or searching a place name;
+ground elevation is filled in automatically.
+
+![Observer settings map picker](docs/img/03-observer-map.png)
+
+---
+
 ## Installation (Windows)
 
 A pre-built Windows executable is available under [Releases](../../releases).
