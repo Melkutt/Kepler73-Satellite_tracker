@@ -12,8 +12,6 @@ Kepler73 is a web-based satellite tracker that runs locally on your machine. It 
 
 The interface runs in your browser, but everything is computed locally. No cloud, no account, no ads.
 
-<img width="2292" height="1392" alt="Kepler73" src="https://github.com/user-attachments/assets/7928a8bf-cac5-408e-96f8-24e1b65bc2f1" />
-
 ---
 
 ## Features
