@@ -52,6 +52,8 @@
       <hr>
       <a onclick="resetView()">⊙ Global view</a>
       <a onclick="zoomToSelected()">📍 Zoom to selected</a>
+      <hr>
+      <a id="menu-basemap" onclick="toggleBaseMap()">☑ Built-in offline map</a>
     </div>
   </div>
 
@@ -472,7 +474,9 @@
           lookup. On a computer with internet use Satellites → <i>Export offline data pack</i>
           (SatNOGS transponders + catalogue, one small ZIP), carry it over on a USB stick and
           <i>Import</i> it on the station. Element sets come from <i>TLE sources</i> – files,
-          network shares or a LAN web server, one per line.</li>
+          network shares or a LAN web server, one per line. A built-in world map
+          (Natural Earth) shows even when no map tiles are cached (Map menu → <i>Built-in
+          offline map</i>); detailed tiles exist only for areas you have browsed before.</li>
         <li><b>Search &amp; add</b> and <b>SatNOGS lookup</b> pull satellites
           from Celestrak or the SatNOGS catalogue; or load a local TLE file.</li>
         <li><b>Pass simulator</b> (bottom-left) scrubs any pass up to a year
@@ -689,6 +693,7 @@
 <script src="/vendor/leaflet/leaflet.js"></script>
 <script src="/vendor/socket.io/socket.io.min.js"></script>
 <script src="/js/map.js?v=10"></script>
+<script src="/js/basemap.js?v=1"></script>
 <script src="/js/sidebar.js?v=13"></script>
 <script src="/js/websocket.js?v=9"></script>
 <script src="/js/ui.js?v=18"></script>

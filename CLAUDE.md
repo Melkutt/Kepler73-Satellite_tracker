@@ -98,6 +98,8 @@ frontend/
   js/transponder.js     transponder panel / dialog (single-select, manual rows, out-of-band)
   js/hamlib.js          Radio/CAT dialog, status-bar RF/mode chip, CAT strip, band parsing
   js/rotor.js           Rotator dialog, STOP/Park, status-bar chip
+  js/basemap.js         built-in offline world map: Natural Earth land/lakes/borders drawn on a canvas
+                        pane UNDER the tile layers (3 world copies for the date line); Map menu toggle
   js/offline.js         data-pack export/import, TLE-sources status in Settings, About dialog +
                         update check
   js/userdata.js        notes (📝/❗ badges), manual-transponder editor, export/import of both,
@@ -330,6 +332,10 @@ SatNOGS data by USB stick about once a year.
   every call to Celestrak (reuses `celestrak.is_blocked()`), SatNOGS, geocode/elevation, the tile
   upstream (cached tiles still served, else an empty tile) and the connectivity check; the status
   dot reads OFFLINE MODE. TLE sources are deliberately exempt.
+- **Built-in world map** (`frontend/vendor/naturalearth/{land,lakes,borders}.json`, Natural Earth 1:50m,
+  public domain, ~1.6 MB, rebuilt by `tools/build_basemap.py`): drawn by `basemap.js` below the tiles. An
+  uncached tile is a 1x1 transparent PNG (offline `_fetch_tile` returns None), so the vector map shows
+  through; a fresh station used to show a blank map. Detailed tiles still need a copied `tile_cache`.
 - **Page needs no internet:** Leaflet and the socket.io client are vendored under `frontend/vendor/`
   (done 2026-10-30; the PyInstaller spec bundles `frontend/` so the exe has them too). Map tiles still
   exist offline only for areas browsed before (copy `data/tile_cache/` to the station).

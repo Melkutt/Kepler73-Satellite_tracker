@@ -22,6 +22,8 @@ The interface runs in your browser, but everything is computed locally. No cloud
 
 ### 🗺 Live Map
 - Real-time satellite positions on an interactive world map (OpenStreetMap / Esri Satellite)
+- A **built-in world map** (Natural Earth, public domain) is drawn underneath, so there is always a
+  map — even on a computer that has never been online and has no cached tiles
 - Ground tracks for all active satellites; extended 3-orbit track for the selected one
 - Footprint circle showing coverage area
 - Observer marker at your configured location
@@ -213,9 +215,10 @@ The single-file `dist\Kepler73.exe` is what goes on the Releases page.
   pass times; anything weeks old drifts noticeably. Transponder data changes slowly (a yearly
   refresh is fine), element sets do not.
 - Leaflet and the socket.io client are **bundled** (`frontend/vendor/`), so the page loads with no
-  internet at all. Map tiles, however, only exist offline for the areas you have looked at
+  internet at all, and a **built-in world map** (land, lakes, borders) is always there. The
+  detailed satellite / street tiles, however, only exist offline for the areas you have looked at
   before — browse your region once on a connected machine and copy the `data/tile_cache`
-  folder to the station.
+  folder (`%USERPROFILE%\.kepler73\tile_cache` for the exe) to the station.
 - Hamlib daemons: `rigctld -m <model> -r <COM port>` — `-r` is the *radio's* serial port, the
   TCP port (4532 / 4533) is set with `-t`; `rigctld -l` lists the model numbers.
 
@@ -237,6 +240,8 @@ The single-file `dist\Kepler73.exe` is what goes on the Releases page.
 - [ ] CAT: TX Doppler, split operation, PTT
 - [ ] Rotor: pre-position before AOS, north-crossing / flip, direct EasyComm backend
 - [x] Leaflet and socket.io bundled locally (works with no internet at all)
+- [x] Built-in offline world map (Natural Earth)
+- [ ] Export / import of cached map tiles ("map pack") for detail on the offline station
 - [ ] Telemetry decoding / waterfall (idea — via a companion tool and `rigctld`)
 - [ ] macOS and Linux builds of the executable
 
@@ -246,7 +251,7 @@ The single-file `dist\Kepler73.exe` is what goes on the Releases page.
 
 Public domain — [The Unlicense](LICENSE). Do what you like with it.
 
-Bundled in `frontend/vendor/` under their own licences: [Leaflet](https://leafletjs.com) (BSD 2-Clause) and the [Socket.IO client](https://socket.io) (MIT).
+Bundled in `frontend/vendor/` under their own licences: [Leaflet](https://leafletjs.com) (BSD 2-Clause), the [Socket.IO client](https://socket.io) (MIT) and the [Natural Earth](https://www.naturalearthdata.com) base map (public domain).
 
 TLE data courtesy of [Celestrak](https://celestrak.org). Transponder data courtesy of [SatNOGS](https://db.satnogs.org). Orbital mechanics via [python-sgp4](https://github.com/brandon-rhodes/python-sgp4).
 
