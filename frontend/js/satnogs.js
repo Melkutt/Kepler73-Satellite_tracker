@@ -63,8 +63,13 @@ async function satnogsFetch(refresh) {
       country: _snDistinctSplit('country')
     };
     _snSel = { mode: new Set(), service: new Set(), type: new Set(), country: new Set() };
+    var when = (data.generated || '').slice(0, 10);
+    try {                                   // the date of the SatNOGS data itself
+      var di = await (await fetch('/api/datapack/info')).json();
+      if (di.data_date) when = String(di.data_date).slice(0, 10);
+    } catch (e) {}
     st.textContent = data.counts.rows + ' rows / ' + data.counts.satellites +
-      ' satellites · ' + (data.generated || '').slice(0, 10);
+      ' satellites · SatNOGS data from ' + when;
     snApply();
   } catch (e) {
     st.textContent = 'Offline – catalogue not available';

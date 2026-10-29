@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Kepler73</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<link rel="stylesheet" href="/css/style.css"/>
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css"/>
+<link rel="stylesheet" href="/css/style.css?v=8"/>
 </head>
 <body>
 
@@ -34,6 +34,12 @@
       <a onclick="exportTLE(false)">⬇ Export TLEs (this module)</a>
       <a onclick="exportTLE(true)">⬇ Export TLEs (all modules)</a>
       <hr>
+      <a onclick="exportUserData()">⬇ Export my transponders &amp; notes</a>
+      <a onclick="importUserDataPick()">⬆ Import my transponders &amp; notes…</a>
+      <hr>
+      <a onclick="exportDataPack()">⬇ Export offline data pack (SatNOGS)…</a>
+      <a onclick="importDataPackPick()">⬆ Import offline data pack / SatNOGS file…</a>
+      <hr>
       <a onclick="removeSelectedSat()">🗑 Remove selected</a>
     </div>
   </div>
@@ -53,6 +59,9 @@
     <button class="menu-btn" onclick="toggleMenu('menu-settings')">Settings ▾</button>
     <div class="dropdown" id="menu-settings">
       <a onclick="showSettingsDialog()">⚙ Observer & location</a>
+      <a onclick="showRadioDialog()">📻 Radio / CAT (Doppler)</a>
+      <a onclick="showRotorDialog()">📡 Rotator (Az/El)</a>
+      <a onclick="showAboutDialog()">ℹ About Kepler73</a>
       <hr>
       <a onclick="quitApp()" style="color:#ef5350">⏻ Quit Kepler73</a>
     </div>
@@ -84,7 +93,11 @@
 
     <div class="panel-header" style="margin-top:8px">
       <span>SATELLITES</span>
-      <button class="icon-btn" onclick="showSearchDialog()" title="Add satellite">＋</button>
+      <button class="icon-btn" onclick="showAddChoice()" title="Add a satellite (Celestrak or SatNOGS)">＋</button>
+    </div>
+    <div id="sat-colhead">
+      <span class="ch-alarm" title="Alarm – sound an alert shortly before this satellite rises (lead time: Settings). Off by default for new satellites.">Alarm</span>
+      <span class="ch-track" title="Track – keep the map centred on this satellite as it moves (one at a time).">Track</span>
     </div>
     <div id="sat-list"></div>
 
@@ -140,7 +153,10 @@
   <span id="sb-sats">0 satellites</span>
   <span id="sb-selected"></span>
   <span id="sb-notice" style="display:none"></span>
-  <span style="margin-left:auto" id="sb-version">Kepler73 v0.3 – SA1CKW</span>
+  <span id="sb-rf" style="display:none" title="Rig frequency / mode / passband"></span>
+  <span id="sb-rot" style="display:none" title="Rotator tracking"></span>
+  <span id="sb-rig" style="display:none" title="CAT Doppler tuning active"></span>
+  <span style="margin-left:auto" id="sb-version">Kepler73 v0.4 – SA1CKW</span>
   <button id="sb-quit" onclick="quitApp()" title="Shut down Kepler73">⏻ Quit</button>
 </div>
 
@@ -174,7 +190,7 @@
 <div class="modal-bg" id="dlg-search">
   <div class="modal modal-wide">
     <h3>🔍 Add satellite</h3>
-    <p class="hint">Search Celestrak by name or NORAD-ID (digits only)</p>
+    <p class="hint" id="search-hint">Search Celestrak by name or NORAD-ID (digits only)</p>
     <div class="search-row">
       <input type="text" id="search-input" placeholder="e.g. NOAA 19 or 33591"
              autocomplete="off" onkeydown="if(event.key==='Enter') doSearch()">
@@ -227,12 +243,21 @@
       <label>TLE source</label>
       <select id="cfg-tle-source">
         <option value="celestrak">Celestrak (online)</option>
-        <option value="file">Local file (offline)</option>
-        <option value="file_then_celestrak">Local file, then Celestrak</option>
+        <option value="file">My TLE sources only (offline)</option>
+        <option value="file_then_celestrak">My TLE sources, then Celestrak</option>
       </select>
-      <label>TLE file / folder</label>
-      <input type="text" id="cfg-tle-file"
-             placeholder="path to a .txt/.tle/.json/.csv file or a folder">
+      <label>TLE sources</label>
+      <textarea id="cfg-tle-file" rows="3" spellcheck="false"
+        placeholder="One per line: a file, a folder or an http(s):// URL, e.g.&#10;\\server\share\tle&#10;http://192.168.1.10/tle/amateur.txt"></textarea>
+      <label></label>
+      <div class="tle-src-box">
+        <button class="btn-cancel" type="button" onclick="fetchTleSources()">⟳ Fetch / check sources now</button>
+        <div id="tle-src-status" class="tle-src-status"></div>
+      </div>
+      <label>Offline station</label>
+      <label class="offline-opt"><input type="checkbox" id="cfg-offline">
+        Never contact the internet (Celestrak, SatNOGS, map and place servers).
+        Your TLE sources above still work – including a server on your LAN.</label>
     </div>
 
     <div class="loc-picker">
@@ -252,6 +277,307 @@
     <div class="modal-btns">
       <button class="btn-primary" onclick="saveSettings()">💾 Save</button>
       <button class="btn-cancel" onclick="closeDialog('dlg-settings')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Rotator / Az-El (Hamlib rotctld) -->
+<div class="modal-bg" id="dlg-rotor">
+  <div class="modal">
+    <h3>📡 Rotator — Az/El tracking</h3>
+    <p class="about-warn">⚠ Not tested on real hardware – use at your own risk. Try the
+      Hamlib dummy rotator (<code>rotctld -m 1</code>) first and keep STOP within reach.</p>
+    <p class="hint">Kepler73 points a Hamlib <code>rotctld</code> at the
+      <b>selected satellite</b>. Start it first: <code>rotctld -m 1</code> for a
+      dummy rotator, or <code>rotctld -m &lt;model&gt; -r &lt;COM port&gt;</code>
+      for a real one. Default port 4533.</p>
+
+    <details class="rig-help">
+      <summary>ℹ How do I start rotctld?</summary>
+      <div class="rig-help-body">
+        <p><code>rotctld -m 1</code> — dummy rotator, just to check the link.</p>
+        <p><code>rotctld -l</code> lists every supported controller and its model
+        number, e.g. <code>rotctld -l | findstr /i yaesu</code>.</p>
+        <p><code>rotctld -m &lt;model&gt; -r &lt;COM port&gt; -s &lt;baud&gt;</code>
+        — <code>-r</code> is the serial port to the rotator controller, <b>not</b>
+        the TCP port here (stays 4533). Add <code>-vvvvv</code> to debug.</p>
+        <p><a href="https://hamlib.github.io/" target="_blank" rel="noopener">hamlib.github.io</a></p>
+      </div>
+    </details>
+
+    <div class="settings-grid">
+      <label>rotctld host</label>
+      <input type="text" id="rot-host" value="127.0.0.1" autocomplete="off">
+      <label>rotctld port</label>
+      <input type="number" id="rot-port" value="4533" step="1">
+      <label>Track above El (°)</label>
+      <input type="number" id="rot-minel" value="3" step="0.5">
+      <label>Park Az / El (°)</label>
+      <span class="rot-pair">
+        <input type="number" id="rot-parkaz" value="0" step="1">
+        <input type="number" id="rot-parkel" value="0" step="1">
+      </span>
+      <label>Deadband Az / El (°)</label>
+      <span class="rot-pair">
+        <input type="number" id="rot-azdb" value="2" step="0.5" min="0">
+        <input type="number" id="rot-eldb" value="2" step="0.5" min="0">
+      </span>
+    </div>
+
+    <div class="radio-actions">
+      <button class="btn-cancel" type="button" onclick="rotTest()">🔌 Test connection</button>
+      <button class="btn-cancel" type="button" onclick="rotPark()">⇤ Park</button>
+      <button class="btn-primary" type="button" id="rot-toggle" onclick="rotToggle()">▶ Start tracking</button>
+    </div>
+    <button type="button" class="rot-stop" onclick="rotStop()">■ STOP ROTOR</button>
+    <div id="rot-msg" class="hint"></div>
+
+    <div class="radio-readout">
+      <div><span>Satellite</span><b id="rot-ro-sat">—</b></div>
+      <div><span>Mode</span><b id="rot-ro-mode">—</b></div>
+      <div><span>Commanded Az / El</span><b id="rot-ro-cmd">—</b></div>
+      <div><span>Rotator reports</span><b id="rot-ro-pos">—</b></div>
+      <div><span>Link</span><b id="rot-ro-link">—</b></div>
+    </div>
+
+    <div class="modal-btns">
+      <button class="btn-primary" onclick="rotSave()">💾 Save</button>
+      <button class="btn-cancel" onclick="closeDialog('dlg-rotor')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add satellite: choose the source -->
+<div class="modal-bg" id="dlg-add-choice">
+  <div class="modal">
+    <h3>＋ Add a satellite</h3>
+    <p class="hint">Where do you want to look for it?</p>
+    <div class="add-choice">
+      <button type="button" class="add-choice-btn" onclick="addChoice('celestrak')">
+        <b>🔍 Celestrak</b>
+        <span>Search by name or NORAD ID in the local Celestrak catalog (instant, no
+        request per search). You can also load a TLE file or paste element sets.</span>
+      </button>
+      <button type="button" class="add-choice-btn" onclick="addChoice('satnogs')">
+        <b>🔎 SatNOGS</b>
+        <span>Browse the SatNOGS catalogue and filter by frequency, mode, service or
+        country – best for finding what actually transmits.</span>
+      </button>
+    </div>
+    <div class="modal-btns">
+      <button class="btn-cancel" onclick="closeDialog('dlg-add-choice')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Satellite note -->
+<div class="modal-bg" id="dlg-note">
+  <div class="modal">
+    <h3>📝 Note – <span id="note-sat">satellite</span></h3>
+    <p class="hint">A reminder only you see, e.g. "Check for this signal" or "Of interest".
+      Satellites with a note show 📝 in the list, or ❗ when flagged.</p>
+    <textarea id="note-text" rows="4" maxlength="1000"
+              placeholder="e.g. Listen for a beacon on 437.550 MHz"></textarea>
+    <label class="note-flag"><input type="checkbox" id="note-flag"> Flag as important (❗)</label>
+    <div class="modal-btns">
+      <button class="btn-cancel" id="note-delete" onclick="noteDelete()">🗑 Remove note</button>
+      <button class="btn-primary" onclick="noteSave()">💾 Save</button>
+      <button class="btn-cancel" onclick="closeDialog('dlg-note')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Manual transponder -->
+<div class="modal-bg" id="dlg-tx-edit">
+  <div class="modal">
+    <h3>✎ <span id="txe-title">Add transponder</span></h3>
+    <p class="hint">For a signal you found yourself. It is stored separately, marked
+      <b>manual</b>, and is never overwritten when the SatNOGS list is refreshed.</p>
+    <div class="settings-grid">
+      <label>Description</label>
+      <input type="text" id="txe-desc" maxlength="120" autocomplete="off"
+             placeholder="e.g. Beacon (found 2026-10-29)">
+      <label>Downlink (MHz)</label>
+      <input type="text" id="txe-dl" inputmode="decimal" autocomplete="off" placeholder="e.g. 437.550">
+      <label>… up to (MHz)</label>
+      <input type="text" id="txe-dlh" inputmode="decimal" autocomplete="off" placeholder="optional – top of a linear passband">
+      <label>Uplink (MHz)</label>
+      <input type="text" id="txe-ul" inputmode="decimal" autocomplete="off" placeholder="optional">
+      <label>… up to (MHz)</label>
+      <input type="text" id="txe-ulh" inputmode="decimal" autocomplete="off" placeholder="optional – top of a linear passband">
+      <label>Mode</label>
+      <input type="text" id="txe-mode" list="txe-modes" maxlength="24" autocomplete="off" placeholder="FM, USB, CW, BPSK1200 …">
+      <label>Baud</label>
+      <input type="text" id="txe-baud" inputmode="numeric" autocomplete="off" placeholder="optional">
+      <label>Inverting</label>
+      <input type="checkbox" id="txe-inv" style="width:auto;margin-top:6px">
+      <label>Active</label>
+      <input type="checkbox" id="txe-active" checked style="width:auto;margin-top:6px">
+      <label>Note</label>
+      <input type="text" id="txe-note" maxlength="300" autocomplete="off" placeholder="optional">
+    </div>
+    <datalist id="txe-modes">
+      <option value="FM"><option value="NFM"><option value="WFM"><option value="USB"><option value="LSB">
+      <option value="CW"><option value="AM"><option value="AFSK"><option value="FSK"><option value="GMSK">
+      <option value="BPSK"><option value="LRPT"><option value="APT"><option value="SSTV">
+    </datalist>
+    <div id="txe-msg" class="hint"></div>
+    <div class="modal-btns">
+      <button class="btn-cancel" id="txe-delete" onclick="txEditDelete()">🗑 Delete</button>
+      <button class="btn-primary" onclick="txEditSave()">💾 Save</button>
+      <button class="btn-cancel" onclick="closeDialog('dlg-tx-edit')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="userdata-file" accept=".json,application/json" style="display:none"
+       onchange="importUserData(this)">
+<input type="file" id="datapack-file" accept=".zip,.json,application/zip,application/json" style="display:none"
+       onchange="importDataPack(this)">
+
+<!-- About -->
+<div class="modal-bg" id="dlg-about">
+  <div class="modal">
+    <h3>🛰 About Kepler73</h3>
+    <p class="hint">Kepler73 <span id="about-version">v0.4</span> — a local satellite tracker for
+      amateur-radio use, by <b>SA1CKW</b>. Everything runs and is cached on your machine;
+      nothing is sent to any cloud.</p>
+    <p class="about-warn">⚠ <b>Radio / CAT and Rotator control are new and have not been
+      tested on real hardware</b> – use them at your own risk. Try the Hamlib dummy devices
+      first (<code>rigctld -m 1</code>, <code>rotctld -m 1</code>) and keep the
+      STOP ROTOR button within reach.</p>
+    <div class="about-update">
+      <button type="button" id="btn-update-check" class="btn-cancel" onclick="checkForUpdate()">⟳ Check for updates</button>
+      <span id="update-result" class="hint"></span>
+    </div>
+
+    <div class="about-body">
+      <p><b>Getting around</b></p>
+      <ul>
+        <li>Pick a satellite in the left sidebar for its ground track,
+          footprint, polar view and next pass.</li>
+        <li>The two checkboxes in the list: <b>Alarm</b> (left) sounds an alert
+          shortly before that satellite rises – off for new satellites, tick the ones
+          you care about; <b>Track</b> (right) keeps the map centred on it. The list
+          is sorted by next pass: whoever comes next (or is overhead) is on top.</li>
+        <li>The right panel shows transponders, live Doppler and the pass —
+          the 📌 pins it open beside the map.</li>
+        <li><b>Modules</b> (Modules menu) are named satellite groups.</li>
+        <li><b>Your own data:</b> ＋ in the transponder panel adds a transponder you
+          found yourself (marked <b>✎ manual</b>, kept when SatNOGS is refreshed);
+          📝 Add note puts a reminder on a satellite (📝 / ❗ in the list). Satellites
+          menu → <i>Export / Import my transponders &amp; notes</i> moves both to another
+          computer.</li>
+        <li><b>Offline station:</b> Settings → <i>Offline station</i> stops every internet
+          lookup. On a computer with internet use Satellites → <i>Export offline data pack</i>
+          (SatNOGS transponders + catalogue, one small ZIP), carry it over on a USB stick and
+          <i>Import</i> it on the station. Element sets come from <i>TLE sources</i> – files,
+          network shares or a LAN web server, one per line.</li>
+        <li><b>Search &amp; add</b> and <b>SatNOGS lookup</b> pull satellites
+          from Celestrak or the SatNOGS catalogue; or load a local TLE file.</li>
+        <li><b>Pass simulator</b> (bottom-left) scrubs any pass up to a year
+          back.</li>
+        <li><b>Radio / CAT</b> sends the Doppler-corrected frequency to a
+          Hamlib <code>rigctld</code>; <b>Rotator</b> points a <code>rotctld</code> at the
+          selected satellite (Settings menu). Both are untested on real hardware.</li>
+        <li><b>Settings</b> — observer location (map picker), min elevation,
+          alarm, the TLE source and its list of sources, and the offline-station switch.</li>
+      </ul>
+
+      <p><b>Data</b> — orbital elements from
+        <a href="https://celestrak.org" target="_blank" rel="noopener">Celestrak</a>,
+        transponders from
+        <a href="https://db.satnogs.org" target="_blank" rel="noopener">SatNOGS</a>,
+        map tiles from OpenStreetMap / Esri, propagation via
+        <a href="https://pypi.org/project/sgp4/" target="_blank" rel="noopener">python-sgp4</a>.
+        Cached under <code>data/</code>, so it degrades to offline use.</p>
+
+      <p><b>Project &amp; source</b><br>
+        <a href="https://github.com/Melkutt/Kepler73-Satellite_tracker" target="_blank" rel="noopener">github.com/Melkutt/Kepler73-Satellite_tracker</a></p>
+    </div>
+
+    <div class="modal-btns">
+      <button class="btn-cancel" onclick="closeDialog('dlg-about')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Radio / CAT (Hamlib rigctld) -->
+<div class="modal-bg" id="dlg-radio">
+  <div class="modal">
+    <h3>📻 Radio / CAT — Doppler tuning</h3>
+    <p class="about-warn">⚠ Not tested on real hardware – use at your own risk. Try the
+      Hamlib dummy rig (<code>rigctld -m 1</code>) first.</p>
+    <p class="hint">Kepler73 sends the Doppler-corrected frequency of the
+      <b>selected satellite</b> to a running <code>rigctld</code> (Hamlib).</p>
+
+    <details class="rig-help">
+      <summary>ℹ How do I start rigctld?</summary>
+      <div class="rig-help-body">
+        <p><b>rigctld</b> is Hamlib's radio-control daemon. It talks to your
+        radio over a serial / USB (COM) port and exposes it on a TCP port
+        (default <b>4532</b>) that Kepler73 connects to. Run it once and leave
+        the window open.</p>
+
+        <p><b>Test without a radio:</b><br>
+        <code>rigctld -m 1</code> &nbsp;— model 1 is a dummy rig, just to check
+        the link.</p>
+
+        <p><b>Find your radio's model number:</b><br>
+        <code>rigctld -l</code> lists every supported rig. Filter it, e.g.
+        <code>rigctld -l | findstr /i 706</code>.</p>
+
+        <p><b>Real radio:</b><br>
+        <code>rigctld -m &lt;model&gt; -r &lt;COM port&gt; -s &lt;baud&gt;</code><br>
+        e.g. <code>rigctld -m 3011 -r COM8 -s 19200</code> for an IC-706MKIIG.
+        <code>-r</code> is the <u>serial COM port to the radio</u> — <b>not</b> the
+        TCP port in this dialog, which stays 4532. <code>-s</code> is the serial
+        speed and must match the radio's CI-V / CAT menu setting. For COM10 and
+        higher use <code>\\.\COM10</code>.</p>
+
+        <p>Won't connect? Add <code>-vvvvv</code> to see what rigctld is doing.
+        Full reference:
+        <a href="https://hamlib.github.io/" target="_blank" rel="noopener">hamlib.github.io</a>
+        ·
+        <a href="https://github.com/Hamlib/Hamlib/wiki" target="_blank" rel="noopener">Hamlib wiki</a></p>
+      </div>
+    </details>
+
+    <div class="settings-grid">
+      <label>rigctld host</label>
+      <input type="text" id="rig-host" value="127.0.0.1" autocomplete="off">
+      <label>rigctld port</label>
+      <input type="number" id="rig-port" value="4532" step="1">
+      <label>Downlink (MHz)</label>
+      <input type="number" id="rig-down" step="0.000001" placeholder="e.g. 145.980">
+      <label>Uplink (MHz)</label>
+      <input type="number" id="rig-up" step="0.000001" placeholder="optional (TX Doppler)">
+      <label>Deadband (Hz)</label>
+      <input type="number" id="rig-deadband" value="10" step="1" min="0">
+      <label>Radio covers (MHz)</label>
+      <input type="text" id="rig-bands" placeholder="e.g. 144-146, 430-440 — blank = no limit">
+      <label>TX Doppler (split)</label>
+      <input type="checkbox" id="rig-tx" style="width:auto;margin-top:6px">
+    </div>
+
+    <div class="radio-actions">
+      <button class="btn-cancel" type="button" onclick="rigTest()">🔌 Test connection</button>
+      <button class="btn-primary" type="button" id="rig-toggle" onclick="rigToggle()">▶ Start Doppler</button>
+    </div>
+    <div id="rig-msg" class="hint"></div>
+
+    <div class="radio-readout">
+      <div><span>Satellite</span><b id="rig-ro-sat">—</b></div>
+      <div><span>Range-rate</span><b id="rig-ro-vr">—</b></div>
+      <div><span>RX commanded</span><b id="rig-ro-rx">—</b></div>
+      <div><span>Rig reports</span><b id="rig-ro-rig">—</b></div>
+      <div><span>Rig mode</span><b id="rig-ro-mode">—</b></div>
+      <div><span>Link</span><b id="rig-ro-link">—</b></div>
+    </div>
+
+    <div class="modal-btns">
+      <button class="btn-primary" onclick="rigSave()">💾 Save</button>
+      <button class="btn-cancel" onclick="closeDialog('dlg-radio')">Close</button>
     </div>
   </div>
 </div>
@@ -318,12 +644,26 @@
   <div id="right-panel-content">
     <div class="panel-header">
       <span id="rp-title">SATELLITE INFO</span>
-      <button class="icon-btn" onclick="refreshTransponders()" title="Refresh from SatNOGS">↻</button>
+      <span class="rp-hdr-btns">
+        <button class="icon-btn" id="rp-pin" onclick="togglePinPanel()"
+                title="Pin panel (keep open, dock beside the map)">📌</button>
+        <button class="icon-btn" onclick="refreshTransponders()" title="Refresh from SatNOGS">↻</button>
+        <button class="icon-btn" id="rp-close" onclick="closeRightPanel()" title="Close panel">✕</button>
+      </span>
     </div>
     <div id="rp-sat-name" class="rp-sat-name">—</div>
+    <div id="rp-note" class="rp-note" style="display:none"></div>
+    <button type="button" id="rp-note-btn" class="rp-note-btn" onclick="noteOpenForSelected()">📝 Add note</button>
 
     <div class="panel-header" style="margin-top:8px">
       <span>TRANSPONDERS</span>
+      <button class="icon-btn" onclick="txEditOpen(null)" title="Add a transponder you found yourself">＋</button>
+    </div>
+    <div id="tx-cat-strip" style="display:none">
+      <span class="tx-cat-lbl">📻 CAT</span>
+      <span id="tx-cat-freq">—</span>
+      <span id="tx-cat-delta"></span>
+      <button id="tx-cat-toggle" type="button" onclick="rigToggleFromPanel()">▶ Doppler</button>
     </div>
     <div id="transponder-list"><span class="hint-text">Loading...</span></div>
 
@@ -346,16 +686,20 @@
 </div>
 
 <!-- Scripts -->
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script src="/vendor/leaflet/leaflet.js"></script>
+<script src="/vendor/socket.io/socket.io.min.js"></script>
 <script src="/js/map.js?v=10"></script>
-<script src="/js/sidebar.js?v=12"></script>
-<script src="/js/websocket.js?v=7"></script>
-<script src="/js/ui.js?v=15"></script>
+<script src="/js/sidebar.js?v=13"></script>
+<script src="/js/websocket.js?v=9"></script>
+<script src="/js/ui.js?v=18"></script>
 <script src="/js/polarmap.js?v=7"></script>
-<script src="/js/transponder.js?v=7"></script>
+<script src="/js/transponder.js?v=11"></script>
 <script src="/js/simulator.js?v=3"></script>
-<script src="/js/satnogs.js?v=4"></script>
+<script src="/js/satnogs.js?v=5"></script>
+<script src="/js/hamlib.js?v=5"></script>
+<script src="/js/rotor.js?v=1"></script>
+<script src="/js/userdata.js?v=1"></script>
+<script src="/js/offline.js?v=3"></script>
 
 </body>
 </html>

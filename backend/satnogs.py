@@ -10,6 +10,7 @@ import json
 import time
 import urllib.request
 from backend.config import DATA_DIR, NETWORK_TIMEOUT
+from backend import netmode
 
 SATNOGS_URL  = "https://db.satnogs.org/api/transmitters/"
 TRANSPONDER_DIR = os.path.join(DATA_DIR, "transponders")
@@ -33,7 +34,7 @@ def _cache_age(norad_id: str) -> float:
 def _fetch_from_api(norad_id: str) -> list:
     """Fetch transponder list from SatNOGS API."""
     url = f"{SATNOGS_URL}?format=json&satellite__norad_cat_id={norad_id}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.3"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.4"})
     with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as resp:
         return json.loads(resp.read().decode())
 
@@ -100,6 +101,19 @@ def get_transponders(norad_id: str, force_refresh: bool = False) -> list:
         except Exception:
             pass
 
+    def _stale():
+        if os.path.exists(cache):
+            try:
+                with open(cache, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return None
+
+    # Offline station: never try the network.
+    if netmode.is_offline():
+        return _stale() or _full_list_transponders(norad_id)
+
     # Fetch from API
     try:
         raw  = _fetch_from_api(norad_id)
@@ -109,14 +123,40 @@ def get_transponders(norad_id: str, force_refresh: bool = False) -> list:
         return data
     except Exception as e:
         print(f"[Kepler73] SatNOGS fetch failed for {norad_id}: {e}")
-        # Return stale cache if available
-        if os.path.exists(cache):
-            try:
-                with open(cache, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                pass
+        # Stale per-satellite cache, else the full list (catalog download or an
+        # imported data pack), else nothing.
+        return _stale() or _full_list_transponders(norad_id)
+
+
+_full_tx = {"mtime": 0.0, "by_norad": {}}
+
+
+def _full_list_transponders(norad_id) -> list:
+    """One satellite's transponders out of the full transmitters list on disk
+    (the SatNOGS catalog download or an imported offline data pack), parsed the
+    same way as a live API answer. Empty if that list isn't there."""
+    global _full_tx
+    path = _db_path("transmitters.json")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
         return []
+    if _full_tx["mtime"] != mtime:
+        by = {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception:
+            raw = []
+        for t in raw:
+            if isinstance(t, dict) and t.get("norad_cat_id") is not None:
+                by.setdefault(str(t["norad_cat_id"]), []).append(t)
+        _full_tx = {"mtime": mtime, "by_norad": by}
+    try:
+        key = str(int(str(norad_id).strip()))
+    except ValueError:
+        key = str(norad_id).strip()
+    return _parse_transponders(_full_tx["by_norad"].get(key, []))
 
 
 def cache_age_days(norad_id: str) -> float:
@@ -149,9 +189,10 @@ def _db_path(name: str) -> str:
     return os.path.join(SATNOGS_DB_DIR, name)
 
 
-def _fetch_db_list(endpoint: str, refresh: bool = False) -> list:
+def _fetch_db_list(endpoint: str, refresh: bool = False, network: bool = True) -> list:
     """Fetch a full SatNOGS list endpoint (satellites / transmitters / tle),
-    cached to disk for DB_CACHE_MAX_AGE. Falls back to a stale cache on error."""
+    cached to disk for DB_CACHE_MAX_AGE. Falls back to a stale cache on error.
+    With ``network=False`` (or the offline-station switch on) it only reads disk."""
     path = _db_path(f"{endpoint}.json")
     if (not refresh and os.path.exists(path)
             and time.time() - os.path.getmtime(path) < DB_CACHE_MAX_AGE):
@@ -160,9 +201,15 @@ def _fetch_db_list(endpoint: str, refresh: bool = False) -> list:
                 return json.load(f)
         except Exception:
             pass
+    if not network or netmode.is_offline():
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        raise RuntimeError(f"No SatNOGS '{endpoint}' list on this computer – import an "
+                           f"offline data pack (Satellites menu) or go online once")
     url = f"{API_BASE}/{endpoint}/?format=json"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.3"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.4"})
         with urllib.request.urlopen(req, timeout=90) as r:
             data = json.loads(r.read())
         with open(path, "w", encoding="utf-8") as f:
@@ -188,10 +235,10 @@ def _freq_mhz(hz):
     return round(hz / 1_000_000, 6) if hz else None
 
 
-def _build_catalog(refresh: bool = False) -> dict:
-    satellites   = _fetch_db_list("satellites", refresh)
-    transmitters = _fetch_db_list("transmitters", refresh)
-    tles         = _fetch_db_list("tle", refresh)
+def _build_catalog(refresh: bool = False, network: bool = True) -> dict:
+    satellites   = _fetch_db_list("satellites", refresh, network)
+    transmitters = _fetch_db_list("transmitters", refresh, network)
+    tles         = _fetch_db_list("tle", refresh, network)
 
     geo = {}
     tle_map = {}
@@ -300,7 +347,7 @@ def catalog_tle(norad_id):
     return (v[0], v[1]) if v and len(v) >= 2 else None
 
 
-def get_catalog(force_refresh: bool = False) -> dict:
+def get_catalog(force_refresh: bool = False, network: bool = True) -> dict:
     """Return the built, filterable SatNOGS catalog. The assembled result is
     cached to catalog.json and only rebuilt when a source list is newer."""
     cat_path = _db_path("catalog.json")
@@ -315,7 +362,7 @@ def get_catalog(force_refresh: bool = False) -> dict:
             except Exception:
                 pass
 
-    catalog = _build_catalog(refresh=force_refresh)
+    catalog = _build_catalog(refresh=force_refresh, network=network)
     try:
         with open(cat_path, "w", encoding="utf-8") as f:
             json.dump(catalog, f)

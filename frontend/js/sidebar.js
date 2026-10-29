@@ -83,15 +83,16 @@ async function loadSatList() {
     div.dataset.name  = sat.name;
     div.dataset.norad = sat.norad_id;
     var followed = (_followSat === sat.name);
-    div.innerHTML = '<input type="checkbox" class="alarm-check" title="Enable alarm"'
+    div.innerHTML = '<input type="checkbox" class="alarm-check" title="Alarm: sound an alert shortly before this satellite rises"'
       + (alarmed ? ' checked' : '') + '>'
       + '<div class="sat-dot" style="background:' + (sat.color || '#00e676') + '"></div>'
       + '<div class="sat-info">'
-      + '<div class="sat-name">' + sat.name + '</div>'
+      + '<div class="sat-name">' + sat.name
+      + '<span class="note-badge" data-norad="' + sat.norad_id + '"></span></div>'
       + '<div class="sat-sub">#' + sat.norad_id + ' &nbsp;|&nbsp; <span id="cd-' + sat.norad_id + '">--:--</span></div>'
       + '</div>'
       + '<div class="sat-el" id="el-' + sat.norad_id + '">—°</div>'
-      + '<input type="checkbox" class="follow-check" title="Lock map on this satellite"'
+      + '<input type="checkbox" class="follow-check" title="Track: keep the map centred on this satellite"'
       + (followed ? ' checked' : '') + '>';
 
     // Fetch countdown immediately for this satellite
@@ -140,6 +141,9 @@ async function loadSatList() {
 
   // Tell server which satellites have alarms enabled (default: none)
   notifyAlarmSats();
+
+  if (typeof refreshNoteBadges === 'function') refreshNoteBadges();
+  _scheduleSort();
 }
 
 function selectSat(name) {
@@ -170,6 +174,7 @@ function getSelectedSat() { return _selectedSat; }
 // ── Live position update in sidebar ─────────────────────────
 
 function updateSidebarPositions(data) {
+  var flipped = false;
   Object.entries(data).forEach(function(entry) {
     var s  = entry[1];
     var el = document.getElementById('el-' + s.norad_id);
@@ -177,7 +182,45 @@ function updateSidebarPositions(data) {
       el.textContent = s.el.toFixed(0) + '°';
       el.className   = 'sat-el' + (s.el > 0 ? ' above' : '');
     }
+    if ((_elNow[s.norad_id] > 0) !== (s.el > 0)) flipped = true;
+    _elNow[s.norad_id] = s.el;
   });
+  if (flipped) _scheduleSort();     // a satellite just rose or set
+}
+
+// ── Sort: whoever comes next (or is overhead now) goes on top ─
+
+var _elNow     = {};     // norad_id -> current elevation, from the live feed
+var _sortTimer = null;
+
+function _scheduleSort() {
+  if (_sortTimer) return;
+  _sortTimer = setTimeout(function() { _sortTimer = null; sortSatList(); }, 150);
+}
+
+function sortSatList() {
+  var list  = document.getElementById('sat-list');
+  var items = Array.prototype.slice.call(list.querySelectorAll('.sat-item'));
+  if (items.length < 2) return;
+
+  // group 0: above the horizon now · 1: next pass known (soonest first)
+  //       2: no pass data yet / none within 7 days · 3: decayed
+  function key(it) {
+    var id = it.dataset.norad;
+    if (_decayed[id])                 return [3, 0];
+    if (_elNow[id] > 0)               return [0, 0];
+    if (_countdowns[id] !== undefined) return [1, _countdowns[id]];
+    return [2, 0];
+  }
+  var keyed = items.map(function(it) {
+    return { it: it, k: key(it), n: (it.dataset.name || '').toLowerCase() };
+  });
+  keyed.sort(function(a, b) {
+    return (a.k[0] - b.k[0]) || (a.k[1] - b.k[1]) ||
+           (a.n < b.n ? -1 : (a.n > b.n ? 1 : 0));
+  });
+  if (keyed.every(function(x, i) { return x.it === items[i]; })) return;
+  keyed.forEach(function(x) { list.appendChild(x.it); });
 }
 
 // ── Next pass ────────────────────────────────────────────────
@@ -351,6 +394,7 @@ function _checkSatcat(noradId, itemEl) {
       _decayed[noradId] = true;
       delete _countdowns[noradId];
       itemEl.classList.add('decayed');
+      _scheduleSort();
       var sub = itemEl.querySelector('.sat-sub');
       if (sub) {
         sub.innerHTML = '#' + noradId +
@@ -379,6 +423,7 @@ function _fetchCountdown(noradId) {
         // aos_dt is "YYYY-MM-DD HH:MM:SS" UTC
         var ms = Date.parse(p.aos_dt.replace(' ', 'T') + 'Z');
         _countdowns[noradId] = ms;
+        _scheduleSort();
       }
     })
     .catch(function() {});

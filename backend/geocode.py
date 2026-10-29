@@ -14,6 +14,7 @@ import urllib.parse
 import urllib.request
 
 from backend.config import DATA_DIR, NETWORK_TIMEOUT
+from backend import netmode
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 ELEVATION_URL = "https://api.open-meteo.com/v1/elevation"
@@ -23,7 +24,7 @@ CACHE_MAX_AGE = 180 * 86400   # geography does not move
 
 os.makedirs(GEOCODE_DIR, exist_ok=True)
 
-_UA = {"User-Agent": "Kepler73/0.3 (amateur radio satellite tracker)"}
+_UA = {"User-Agent": "Kepler73/0.4 (amateur radio satellite tracker)"}
 
 
 def _cache_get(key: str):
@@ -63,6 +64,9 @@ def geocode(query: str) -> list:
     if cached is not None:
         return cached
 
+    if netmode.is_offline():
+        raise ConnectionError("Offline station mode – enter coordinates manually")
+
     params = urllib.parse.urlencode({"q": q, "format": "json", "limit": 5,
                                      "addressdetails": 0})
     try:
@@ -95,6 +99,9 @@ def elevation(lat: float, lon: float) -> float | None:
     cached = _cache_get(key)
     if cached is not None:
         return cached.get("elevation")
+
+    if netmode.is_offline():
+        return None
 
     params = urllib.parse.urlencode({"latitude": round(lat, 5),
                                      "longitude": round(lon, 5)})

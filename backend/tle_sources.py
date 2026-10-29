@@ -23,11 +23,17 @@ import os
 import csv
 import json
 import glob
+import time
+import hashlib
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 from sgp4.api import Satrec
 from sgp4 import omm
 from sgp4.exporter import export_tle
+
+from backend.config import BULK_GROUPS, BULK_REFRESH_SEC, TLE_DIR
 
 # Alpha-5 alphabet: digits then A-Z without I and O (Celestrak scheme).
 _ALPHA5 = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ"
@@ -132,6 +138,30 @@ def _omm_fields_to_record(fields: dict) -> dict | None:
         return None
 
 
+def _satnogs_tle_record(entry: dict) -> dict | None:
+    """A SatNOGS DB /api/tle/ entry ({tle0, tle1, tle2, norad_cat_id, ...}) as a
+    canonical record."""
+    l1 = (entry.get("tle1") or "").strip()
+    l2 = (entry.get("tle2") or "").strip()
+    if not (l1.startswith("1 ") and l2.startswith("2 ")):
+        return None
+    try:
+        Satrec.twoline2rv(l1, l2)
+    except Exception:
+        return None
+    norad = alpha5_to_num(str(entry.get("norad_cat_id") or l1[2:7]))
+    name = (entry.get("tle0") or "").strip()
+    if name.startswith("0 "):
+        name = name[2:].strip()
+    return {
+        "name":      name or f"NORAD {norad}",
+        "norad_id":  norad,
+        "tle_line1": l1,
+        "tle_line2": l2,
+        "tle_epoch": l1[18:32].strip(),
+    }
+
+
 def parse_gp_json(text: str) -> list:
     """Parse a Celestrak GP/OMM JSON document (array or single object)."""
     data = json.loads(text)
@@ -141,7 +171,10 @@ def parse_gp_json(text: str) -> list:
         return []
     out = []
     for entry in data:
-        rec = _omm_fields_to_record(entry)
+        if isinstance(entry, dict) and "tle1" in entry:
+            rec = _satnogs_tle_record(entry)            # SatNOGS's own TLE JSON
+        else:
+            rec = _omm_fields_to_record(entry)          # Celestrak GP / OMM JSON
         if rec:
             out.append(rec)
     return out
@@ -185,6 +218,137 @@ def parse_any(text: str) -> list:
     return []
 
 
+# ── TLE sources: several files / folders / URLs, one per line ─
+#
+# The ``tle_file`` setting holds one source per line (like Gpredict's list of
+# TLE servers): a file, a folder (also a network share) or an http(s):// URL,
+# e.g. a web server on the LAN. URL sources are downloaded on an explicit
+# refresh only (never while searching) and cached as parsed records under
+# data/tle_cache/sources/, so they keep working while the server is down.
+# These are the user's own sources: the offline-station switch does not block
+# them.
+
+SOURCES_DIR   = os.path.join(TLE_DIR, "sources")
+URL_MAX_BYTES = 30_000_000
+URL_TIMEOUT   = 20
+_url_mem: dict = {}      # url -> (cache-file mtime, [records])
+
+
+def split_sources(spec) -> list:
+    """The non-empty, non-comment lines of the TLE-sources setting."""
+    out = []
+    for ln in str(spec or "").replace("\r", "\n").split("\n"):
+        ln = ln.strip()
+        if ln and not ln.startswith("#"):
+            out.append(ln)
+    return out
+
+
+def _is_url(src: str) -> bool:
+    return src.lower().startswith(("http://", "https://"))
+
+
+def _url_cache_file(url: str) -> str:
+    return os.path.join(SOURCES_DIR, hashlib.sha1(url.encode("utf-8")).hexdigest()[:16] + ".json")
+
+
+def _url_records(url: str) -> list:
+    path = _url_cache_file(url)
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        raise FileNotFoundError(f"not fetched yet: {url}")
+    hit = _url_mem.get(url)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    with open(path, "r", encoding="utf-8") as f:
+        records = json.load(f).get("records", [])
+    _url_mem[url] = (mtime, records)
+    return records
+
+
+def fetch_url_source(url: str, timeout: float = URL_TIMEOUT) -> dict:
+    """Download one URL source (TLE / 3LE text, GP JSON, GP CSV or SatNOGS TLE
+    JSON) and cache its records. A failed download keeps the previous cached copy.
+    Returns {source, kind, ok, count, error}."""
+    res = {"source": url, "kind": "url", "ok": False, "count": 0, "error": ""}
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.4"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read(URL_MAX_BYTES + 1)
+        if len(raw) > URL_MAX_BYTES:
+            raise ValueError("the file is larger than 30 MB")
+        records = parse_any(raw.decode("utf-8-sig", "replace"))
+        if not records:
+            raise ValueError("no element sets found in the download")
+        os.makedirs(SOURCES_DIR, exist_ok=True)
+        path = _url_cache_file(url)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"url": url, "fetched": time.time(), "records": records}, f)
+        os.replace(tmp, path)
+        res.update(ok=True, count=len({r["norad_id"] for r in records}))
+    except urllib.error.HTTPError as e:
+        res["error"] = f"HTTP {e.code} {e.reason}"
+    except urllib.error.URLError as e:
+        res["error"] = str(e.reason)
+    except Exception as e:                      # timeout, bad data, ...
+        res["error"] = str(e) or type(e).__name__
+    return res
+
+
+def refresh_url_sources(spec) -> list:
+    """Re-download every URL line of ``spec``; returns one result per URL."""
+    return [fetch_url_source(s) for s in split_sources(spec) if _is_url(s)]
+
+
+def sources_status(spec) -> list:
+    """One row per line of ``spec`` for the Settings dialog:
+    {source, kind: url|file|folder, count (distinct satellites), age_sec, error}."""
+    rows = []
+    for src in split_sources(spec):
+        row = {"source": src, "kind": "url", "count": 0, "age_sec": None, "error": ""}
+        try:
+            if _is_url(src):
+                recs = _url_records(src)
+                row["age_sec"] = int(time.time() - os.path.getmtime(_url_cache_file(src)))
+            else:
+                path = os.path.expanduser(src)
+                row["kind"] = "folder" if os.path.isdir(path) else "file"
+                recs = _load_path_records(src)
+            row["count"] = len({r["norad_id"] for r in recs})
+        except FileNotFoundError as e:
+            row["error"] = str(e).replace("TLE path does not exist: ", "path not found: ")
+        except ValueError as e:
+            row["error"] = str(e)
+        except Exception as e:
+            row["error"] = str(e) or type(e).__name__
+        rows.append(row)
+    return rows
+
+
+def load_file_records(spec: str) -> list:
+    """Every record from the TLE sources in ``spec`` (one per line: file, folder
+    or URL), duplicates kept. A single plain path behaves exactly as before.
+    Unusable sources are skipped; raises FileNotFoundError / ValueError only
+    when nothing at all could be read."""
+    sources = split_sources(spec)
+    if not sources:
+        raise FileNotFoundError("TLE path does not exist: (empty)")
+    if len(sources) == 1 and not _is_url(sources[0]):
+        return _load_path_records(sources[0])
+
+    records, problems = [], []
+    for src in sources:
+        try:
+            records.extend(_url_records(src) if _is_url(src) else _load_path_records(src))
+        except (FileNotFoundError, ValueError) as e:
+            problems.append(f"{src}: {e}")
+    if not records:
+        raise ValueError("No TLE / GP data from any source – " + "; ".join(problems))
+    return records
+
+
 # ── File / folder catalog ───────────────────────────────────
 
 def _iter_paths(path: str):
@@ -203,8 +367,8 @@ def _signature(path: str):
     return tuple((p, os.path.getmtime(p)) for p in _iter_paths(path))
 
 
-def load_file_records(path: str) -> list:
-    """Load and cache *every* record from a TLE/GP file or folder, keeping
+def _load_path_records(path: str) -> list:
+    """Load and cache *every* record from one TLE/GP file or folder, keeping
     duplicates (e.g. the same satellite at several epochs across dated files).
 
     Raises FileNotFoundError if the path does not exist and ValueError if
@@ -235,11 +399,21 @@ def load_file_records(path: str) -> list:
     return records
 
 
+def _epoch_ts(rec: dict) -> float:
+    try:
+        return tle_epoch_dt(rec["tle_line1"]).timestamp()
+    except Exception:
+        return 0.0
+
+
 def load_file_catalog(path: str) -> list:
-    """One record per satellite (latest file wins on a duplicate norad_id)."""
+    """One record per satellite: the newest element set wins when several
+    sources / files hold the same norad_id (on equal epochs the later one wins)."""
     by_norad: dict = {}
     for rec in load_file_records(path):
-        by_norad[rec["norad_id"]] = rec
+        cur = by_norad.get(rec["norad_id"])
+        if cur is None or _epoch_ts(rec) >= _epoch_ts(cur):
+            by_norad[rec["norad_id"]] = rec
     return list(by_norad.values())
 
 
@@ -292,7 +466,111 @@ def find_in_file_near(path: str, norad_id: str, when: datetime) -> dict | None:
     return best
 
 
+# ── Bulk catalog (whole Celestrak groups, one request each) ──
+#
+# celestrak.fetch_group() mirrors e.g. GROUP=active into
+# data/tle_cache/bulk_<group>.json. Everything below reads that file, so name
+# searches and "Update all TLEs" cost zero Celestrak requests once it is fresh.
+
+_bulk_state = {"sig": None, "by_norad": {}, "records": [], "fetched": 0.0, "files": 0}
+
+
+def _load_bulk() -> dict:
+    """The parsed bulk catalog, re-read only when a bulk file's mtime changes.
+    The returned dict is replaced wholesale (never mutated) so concurrent
+    readers always see a consistent snapshot."""
+    global _bulk_state
+    from backend import celestrak
+    files = [p for p in (celestrak.bulk_path(g) for g in BULK_GROUPS)
+             if os.path.exists(p)]
+    sig = tuple((p, os.path.getmtime(p)) for p in files)
+    if sig == _bulk_state["sig"]:
+        return _bulk_state
+
+    by_norad: dict = {}
+    oldest = None
+    for p in files:
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        t = float(doc.get("fetched", 0) or 0)
+        oldest = t if oldest is None else min(oldest, t)
+        for rec in doc.get("records", []):
+            by_norad[rec["norad_id"]] = rec
+    _bulk_state = {"sig": sig, "by_norad": by_norad,
+                   "records": list(by_norad.values()),
+                   "fetched": oldest or 0.0, "files": len(files)}
+    return _bulk_state
+
+
+def bulk_age_sec() -> float:
+    """Seconds since the stalest bulk group was downloaded; inf if any
+    configured group is missing."""
+    st = _load_bulk()
+    if not st["by_norad"] or st["files"] < len(BULK_GROUPS):
+        return float("inf")
+    return max(0.0, time.time() - st["fetched"])
+
+
+def bulk_info() -> dict:
+    st = _load_bulk()
+    age = bulk_age_sec()
+    return {"count": len(st["by_norad"]),
+            "fetched": st["fetched"],
+            "age_sec": None if age == float("inf") else int(age),
+            "groups": list(BULK_GROUPS)}
+
+
+def bulk_find(norad_id) -> dict | None:
+    return _load_bulk()["by_norad"].get(_wanted_id(norad_id))
+
+
+def bulk_search(query: str, limit: int = 300) -> tuple:
+    """Search the bulk catalog by NORAD id (exact) or name (substring, prefix
+    matches first). Returns (records[:limit], total_matches)."""
+    recs = _load_bulk()["records"]
+    q = (query or "").strip()
+    if not q:
+        return [], 0
+    if q.isdigit():
+        wanted = str(int(q))
+        hits = [r for r in recs if r["norad_id"] == wanted]
+    else:
+        ql = q.lower()
+        hits = [r for r in recs if ql in r["name"].lower()]
+        hits.sort(key=lambda r: (not r["name"].lower().startswith(ql),
+                                 r["name"].lower()))
+    return hits[:limit], len(hits)
+
+
+def refresh_bulk(force: bool = False) -> dict:
+    """Download the configured Celestrak groups (one request per group) unless
+    the cached copy is younger than BULK_REFRESH_SEC and ``force`` is False.
+    Returns {"refreshed": bool, "count": satellites in the catalog afterwards}."""
+    from backend import celestrak
+    if not force and bulk_age_sec() < BULK_REFRESH_SEC:
+        return {"refreshed": False, "count": len(_load_bulk()["by_norad"])}
+    ok = False
+    for g in BULK_GROUPS:
+        if celestrak.fetch_group(g):
+            ok = True
+    return {"refreshed": ok, "count": len(_load_bulk()["by_norad"])}
+
+
 # ── Source-aware resolution (shared by routes.py and sockets.py) ──
+
+def _bulk_tuple(norad_id: str) -> tuple | None:
+    rec = bulk_find(norad_id)
+    return (rec["name"], rec["tle_line1"], rec["tle_line2"]) if rec else None
+
+
+def _local_fallback(norad_id: str) -> tuple | None:
+    """Best element set available without touching the network: the bulk
+    Celestrak catalog or the cached SatNOGS catalog, whichever is newer."""
+    return _newest(_bulk_tuple(norad_id), _satnogs_fallback(norad_id))
+
 
 def _satnogs_fallback(norad_id: str) -> tuple | None:
     """Element set from the cached SatNOGS catalog – used as a fallback when
@@ -344,13 +622,19 @@ def resolve_tle(norad_id: str, config: dict, allow_celestrak: bool = True) -> tu
         if rec:
             return rec["name"], rec["tle_line1"], rec["tle_line2"]
         if source == "file":
-            return _satnogs_fallback(norad_id)
+            return _local_fallback(norad_id)
 
     if source == "file" and not path:
-        return _satnogs_fallback(norad_id)
+        return _local_fallback(norad_id)
 
     if not allow_celestrak:
-        return _satnogs_fallback(norad_id)
+        return _local_fallback(norad_id)
 
     from backend import celestrak
-    return _newest(celestrak.fetch_tle(norad_id), _satnogs_fallback(norad_id))
+    bulk = _bulk_tuple(norad_id)
+    if bulk and bulk_age_sec() < BULK_REFRESH_SEC:
+        # The whole-catalog download is recent: no per-satellite request needed.
+        return _newest(bulk, _satnogs_fallback(norad_id))
+    # Not in the bulk catalog (decayed / outside the mirrored groups) or the
+    # catalog is stale: ask Celestrak for this one satellite.
+    return _newest(bulk, celestrak.fetch_tle(norad_id), _satnogs_fallback(norad_id))

@@ -27,8 +27,9 @@ for d in [MODULES_DIR, TLE_DIR, TILE_DIR]:
 
 # ── App info ──────────────────────────────────────────────────
 APP_NAME    = "Kepler73"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 AUTHOR      = "SA1CKW"
+GITHUB_REPO = "Melkutt/Kepler73-Satellite_tracker"
 
 # ── Celestrak ─────────────────────────────────────────────────
 CELESTRAK_URL   = "https://celestrak.org/NORAD/elements/gp.php"
@@ -59,6 +60,20 @@ TLE_UPDATE_INTERVAL = 6 * 3600    # seconds between auto-update sweeps
 TLE_STALE_SEC       = 18 * 3600   # only re-fetch an element set older than this
 CELESTRAK_BACKOFF_SEC = 8 * 3600  # stay away this long after a rate-limit block
 TLE_MANUAL_COOLDOWN_SEC = 2 * 3600  # min gap between manual "Update all TLEs" (Celestrak sources)
+
+# Bulk catalog: instead of one request per satellite, download a whole Celestrak
+# group (e.g. "active", ~14k objects) in a single request and cache it on disk.
+# Search and "Update all TLEs" then work from that file, so the number of
+# Celestrak requests no longer grows with the number of satellites / modules.
+BULK_GROUPS        = ("active",)    # Celestrak GROUP names to mirror
+BULK_REFRESH_SEC   = 12 * 3600      # auto-refresh the bulk file when older than this
+BULK_TIMEOUT       = 90             # seconds – the group download is several MB
+# Satellites NOT in the bulk catalog (derelicts, decommissioned) still need a
+# per-satellite Celestrak request. Their elements barely change, so ask for them
+# at most this often (decayed objects are skipped altogether) and space the
+# requests out.
+OFFCATALOG_STALE_SEC = 3 * 86400
+OFFCATALOG_SPACING   = 0.6          # seconds between per-satellite requests
 
 # ── Map defaults ──────────────────────────────────────────────
 MAP_CENTER_LAT = 59.3293

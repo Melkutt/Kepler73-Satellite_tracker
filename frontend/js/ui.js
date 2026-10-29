@@ -116,11 +116,35 @@ function showSearchDialog() {
   openDialog('dlg-search');
   setTimeout(function() { document.getElementById('search-input').focus(); }, 100);
   closeAllMenus();
+  _loadCatalogHint();
+}
+
+function _fmtAge(sec) {
+  if (sec == null) return 'never';
+  var m = Math.round(sec / 60);
+  if (m < 90)  return m + ' min ago';
+  var h = Math.round(m / 60);
+  if (h < 48)  return h + ' h ago';
+  return Math.round(h / 24) + ' d ago';
+}
+
+// Tell the user whether searches are served from the local Celestrak catalog.
+function _loadCatalogHint() {
+  var el = document.getElementById('search-hint');
+  if (!el) return;
+  fetch('/api/tle/catalog').then(function(r) { return r.json(); }).then(function(c) {
+    el.textContent = c.count
+      ? 'Searches the local Celestrak catalog first (' + c.count.toLocaleString() +
+        ' satellites, updated ' + _fmtAge(c.age_sec) + ') – only names / numbers ' +
+        'not found there are sent to Celestrak.'
+      : 'Search Celestrak by name or NORAD-ID (digits only). "Update all TLEs" ' +
+        'downloads a local catalog so later searches send no requests.';
+  }).catch(function() {});
 }
 
 // Render a list of {name, norad_id, tle_line1, tle_line2, tle_epoch} into the
 // results box. Shared by Celestrak search and file/paste import.
-function renderSearchResults(list) {
+function renderSearchResults(list, note) {
   var status  = document.getElementById('search-status');
   var results = document.getElementById('search-results');
   results.innerHTML  = '';
@@ -133,7 +157,8 @@ function renderSearchResults(list) {
 
   status.textContent = filtered.length + ' result' +
     (filtered.length !== 1 ? 's' : '') +
-    (filtered.length ? ' – click or double-click to select' : '');
+    (filtered.length ? ' – click or double-click to select' : '') +
+    (note ? ' ' + note : '');
 
   var existingIds = new Set(
     Array.from(document.querySelectorAll('.sat-item')).map(function(el) {
@@ -176,7 +201,11 @@ async function doSearch() {
       status.textContent = 'Error: ' + data.error;
       return;
     }
-    renderSearchResults(data.results);
+    var note = '';
+    if (data.total && data.total > data.results.length) {
+      note = '(first ' + data.results.length + ' of ' + data.total + ' – refine the search)';
+    }
+    renderSearchResults(data.results, note);
   } catch(e) {
     status.textContent = 'Network error: ' + e.message;
   }
@@ -321,7 +350,8 @@ async function refreshAllTLE(force) {
       if (sb) sb.innerHTML = orig;
       alert('TLE update failed: ' + data.error);
     } else {
-      var msg = '✓ TLEs updated: ' + data.updated + '/' + data.total;
+      var msg = '✓ ' + data.updated + ' of ' + data.total + ' satellites updated across ' +
+        data.modules + ' module' + (data.modules !== 1 ? 's' : '');
       if (data.failed && data.failed.length) {
         msg += '  Failed: ' + data.failed.join(', ');
       }
@@ -353,6 +383,8 @@ async function showSettingsDialog() {
   document.getElementById('cfg-show-deb').checked  = _showDebris;
   document.getElementById('cfg-tle-source').value  = cfg.tle_source || 'celestrak';
   document.getElementById('cfg-tle-file').value    = cfg.tle_file || '';
+  document.getElementById('cfg-offline').checked   = !!cfg.offline_mode;
+  if (typeof loadTleSourceStatus === 'function') loadTleSourceStatus();
   document.getElementById('loc-search').value          = '';
   document.getElementById('loc-search-results').innerHTML = '';
   openDialog('dlg-settings');
@@ -445,7 +477,8 @@ async function saveSettings() {
     alarm_min:   document.getElementById('cfg-alarm-min').value,
     alarm_sound: document.getElementById('cfg-alarm-sound').value,
     tle_source:  document.getElementById('cfg-tle-source').value,
-    tle_file:    document.getElementById('cfg-tle-file').value
+    tle_file:    document.getElementById('cfg-tle-file').value,
+    offline_mode: document.getElementById('cfg-offline').checked
   };
   await fetch('/api/config', {
     method: 'POST',
@@ -456,6 +489,8 @@ async function saveSettings() {
   sendAlarmMinutes(cfg.alarm_min);
   sendAlarmSound(cfg.alarm_sound);
   closeDialog('dlg-settings');
+  checkNetworkStatus();
+  if (typeof afterTleSourcesSaved === 'function') afterTleSourcesSaved(cfg.tle_file);
 }
 
 // ── Alarm UI ─────────────────────────────────────────────────
@@ -498,7 +533,12 @@ async function checkNetworkStatus() {
     var res  = await fetch('/api/info');
     var data = await res.json();
     var el   = document.getElementById('status-online');
-    if (data.online) {
+    var sbv  = document.getElementById('sb-version');
+    if (sbv && data.version) sbv.textContent = 'Kepler73 v' + data.version.replace(/\.0$/, '') + ' – SA1CKW';
+    if (data.offline_mode) {
+      el.textContent = 'OFFLINE MODE';
+      el.className   = 'status-dot offline';
+    } else if (data.online) {
       el.textContent = 'ONLINE';
       el.className   = 'status-dot online';
     } else {

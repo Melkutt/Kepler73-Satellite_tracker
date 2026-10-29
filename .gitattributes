@@ -1,0 +1,2 @@
+# Bundled third-party libraries must stay byte-identical to the published releases
+frontend/vendor/** -text

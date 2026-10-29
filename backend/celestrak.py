@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 from sgp4.api import Satrec
 from sgp4 import omm
 from backend.config import (CELESTRAK_URL, NETWORK_TIMEOUT, TLE_DIR,
-                            CELESTRAK_BACKOFF_SEC)
+                            CELESTRAK_BACKOFF_SEC, BULK_TIMEOUT)
+from backend import netmode
 
 SATCAT_URL = "https://celestrak.org/satcat/records.php"
 
@@ -26,12 +27,14 @@ _blocked_until = 0.0
 
 
 def is_blocked() -> bool:
-    return time.time() < _blocked_until
+    """True while Celestrak must not be contacted: a rate-limit back-off is
+    running, or the offline-station switch is on."""
+    return netmode.is_offline() or time.time() < _blocked_until
 
 
 def blocked_until() -> float:
     """Unix timestamp the back-off ends, or 0 if not blocked."""
-    return _blocked_until if is_blocked() else 0.0
+    return _blocked_until if time.time() < _blocked_until else 0.0
 
 
 def _note_block(reason: str = ""):
@@ -51,6 +54,53 @@ def _looks_blocked(exc: Exception = None, body: str = "") -> bool:
 
 def _cache_path(norad_id: str, fmt: str = 'json') -> str:
     return os.path.join(TLE_DIR, f"{norad_id}.{fmt}")
+
+
+def bulk_path(group: str) -> str:
+    return os.path.join(TLE_DIR, f"bulk_{group}.json")
+
+
+def fetch_group(group: str) -> int | None:
+    """Download a whole Celestrak GP group in ONE request and store it as the
+    bulk catalog (``data/tle_cache/bulk_<group>.json``: canonical records plus
+    a ``fetched`` timestamp). Returns the number of satellites, or None on
+    failure (blocked, offline, unparseable). A block response sets the usual
+    back-off so nothing else hits Celestrak for a while.
+    """
+    if is_blocked():
+        return None
+    from backend.tle_sources import parse_gp_json   # local import: no cycle at load time
+    url = f"{CELESTRAK_URL}?GROUP={group}&FORMAT=JSON"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.4"})
+        with urllib.request.urlopen(req, timeout=BULK_TIMEOUT) as r:
+            raw = r.read()
+
+        text = raw.decode("utf-8", "replace")
+        if not text.lstrip().startswith(("[", "{")):
+            # Not JSON: a rate-limit page or an error message.
+            if _looks_blocked(body=text[:2000]):
+                _note_block(f"GROUP={group} body")
+            return None
+
+        records = parse_gp_json(text)
+        if not records:
+            return None
+
+        tmp = bulk_path(group) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"group": group, "fetched": time.time(),
+                       "records": records}, f)
+        os.replace(tmp, bulk_path(group))
+        print(f"[Kepler73] Celestrak bulk catalog '{group}': {len(records)} satellites")
+        return len(records)
+
+    except Exception as e:
+        if _looks_blocked(exc=e):
+            _note_block(f"HTTP {getattr(e, 'code', '?')} on GROUP={group}")
+        else:
+            print(f"[Kepler73] Celestrak bulk fetch '{group}' failed: {e}")
+        return None
 
 
 def fetch_tle(norad_id: str) -> tuple | None:
@@ -81,7 +131,7 @@ def _fetch_json(norad_id: str) -> tuple | None:
     url = f"{CELESTRAK_URL}?CATNR={norad_id}&FORMAT=JSON"
     try:
         req = urllib.request.Request(
-            url, headers={"User-Agent": "Kepler73/0.3"})
+            url, headers={"User-Agent": "Kepler73/0.4"})
         with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as r:
             raw = r.read()
 
@@ -114,7 +164,7 @@ def _fetch_tle_legacy(norad_id: str) -> tuple | None:
     url = f"{CELESTRAK_URL}?CATNR={norad_id}&FORMAT=TLE"
     try:
         req = urllib.request.Request(
-            url, headers={"User-Agent": "Kepler73/0.3"})
+            url, headers={"User-Agent": "Kepler73/0.4"})
         with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as r:
             text = r.read().decode("utf-8")
 
@@ -200,6 +250,10 @@ def search_tle(query: str) -> list:
     Search Celestrak by name or NORAD ID.
     Returns a list of {name, norad_id, tle_line1, tle_line2, tle_epoch}
     """
+    if netmode.is_offline():
+        raise ConnectionError(
+            "Offline station mode – Celestrak is not contacted. Search the local "
+            "catalog or load a TLE source instead.")
     if is_blocked():
         import time as _t
         mins = int((blocked_until() - _t.time()) / 60) + 1
@@ -214,7 +268,7 @@ def search_tle(query: str) -> list:
 
     try:
         req = urllib.request.Request(
-            url, headers={"User-Agent": "Kepler73/0.3"})
+            url, headers={"User-Agent": "Kepler73/0.4"})
         with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as r:
             data = json.loads(r.read())
 
@@ -269,7 +323,7 @@ def lookup_satcat(norad_id: str) -> dict | None:
         return None
     url = f"{SATCAT_URL}?CATNR={norad_id}&FORMAT=JSON"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.3"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.4"})
         with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as r:
             data = json.loads(r.read())
         if isinstance(data, list) and data:
@@ -284,6 +338,8 @@ def lookup_satcat(norad_id: str) -> dict | None:
 
 def check_online() -> bool:
     """Check internet connectivity using a reliable host."""
+    if netmode.is_offline():
+        return False
     for url in ["https://google.com", "https://cloudflare.com", "https://celestrak.org"]:
         try:
             urllib.request.urlopen(url, timeout=3)

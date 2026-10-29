@@ -29,6 +29,14 @@ socket.on('pass_alarm', function(data) {
   triggerAlarmUI(data);
 });
 
+socket.on('rig_status', function(data) {
+  if (typeof updateRigStatus === 'function') updateRigStatus(data);
+});
+
+socket.on('rotor_status', function(data) {
+  if (typeof updateRotorStatus === 'function') updateRotorStatus(data);
+});
+
 // ── Selected satellite - tells server to compute 3-orbit track ──
 
 function notifySelected(name) {

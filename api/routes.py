@@ -14,6 +14,9 @@ import backend.modules as mod_mgr
 import backend.celestrak as celestrak
 import backend.tle_sources as tle_sources
 import backend.satcat as satcat
+import backend.datapack as datapack
+import backend.updatecheck as updatecheck
+from backend import netmode
 from backend.sgp4_engine import (propagate, forward_track, find_next_pass,
                                   get_pass_track, eci_to_azel, jd_to_dt,
                                   now_jd, compass, footprint_km,
@@ -30,6 +33,7 @@ state = {
     "config":        mod_mgr.load_config(),
     "online":        False,
 }
+netmode.set_offline(state["config"].get("offline_mode", False))
 
 # Short-lived cache of /api/passes/<id> results (see get_next_pass).
 _pass_cache: dict = {}
@@ -48,6 +52,174 @@ def _reload_records():
             state["sat_records"][sat["norad_id"]] = rec
         except Exception:
             pass
+
+
+_tle_update_lock = threading.Lock()
+
+# norad_id -> unix time of the last per-satellite Celestrak request for a
+# satellite that is not in the bulk catalog. Persisted so a restart doesn't
+# re-ask for every derelict at once; see update_all_module_tles().
+_offcat_attempts: dict = {}
+_offcat_loaded = False
+
+
+def _offcat_file() -> str:
+    from backend.config import TLE_DIR
+    return os.path.join(TLE_DIR, "offcatalog_attempts.json")
+
+
+def _offcat_get(nid: str) -> float:
+    global _offcat_loaded
+    if not _offcat_loaded:
+        _offcat_loaded = True
+        try:
+            import json
+            with open(_offcat_file(), "r", encoding="utf-8") as f:
+                _offcat_attempts.update({str(k): float(v) for k, v in json.load(f).items()})
+        except (OSError, ValueError):
+            pass
+    return _offcat_attempts.get(nid, 0.0)
+
+
+def _offcat_mark(nids) -> None:
+    import json
+    now = _time.time()
+    for nid in nids:
+        _offcat_attempts[nid] = now
+    try:
+        with open(_offcat_file(), "w", encoding="utf-8") as f:
+            json.dump(_offcat_attempts, f)
+    except OSError:
+        pass
+
+
+def update_all_module_tles(allow_celestrak: bool = True, only_stale: bool = False) -> dict:
+    """Refresh the element sets of every satellite in EVERY module (not just the
+    active one) using the configured TLE source.
+
+    Each distinct satellite is resolved once and applied to every module that
+    holds it. An element set is only replaced by a strictly newer one, never
+    downgraded. With ``only_stale`` satellites whose elements are younger than
+    TLE_STALE_SEC are skipped (the background auto-update). Changed modules are
+    saved to disk; the active one is updated in place and its propagation
+    records rebuilt.
+
+    Returns {"updated": distinct satellites that got newer elements,
+    "total": distinct satellites across all modules, "failed": [names],
+    "modules": number of modules}.
+    """
+    from datetime import datetime, timezone
+    from backend.config import TLE_STALE_SEC, OFFCATALOG_STALE_SEC, OFFCATALOG_SPACING
+
+    with _tle_update_lock:
+        active  = state["active_module"]
+        modules = {}
+        for name in mod_mgr.list_modules():
+            if active and active.get("name") == name:
+                modules[name] = active          # live object, shared with state
+            else:
+                try:
+                    modules[name] = mod_mgr.load_module(name)
+                except FileNotFoundError:
+                    continue
+
+        now = datetime.now(timezone.utc)
+
+        def _stale(sat):
+            if not only_stale:
+                return True
+            try:
+                age = (now - tle_sources.tle_epoch_dt(sat.get("tle_line1", ""))).total_seconds()
+                return not (0 <= age < TLE_STALE_SEC)
+            except Exception:
+                return True
+
+        src = state["config"].get("tle_source", "celestrak")
+        have_catalog = tle_sources.bulk_info()["count"] > 0
+
+        def _needs_request(nid):
+            """True if resolving this satellite would cost a Celestrak request:
+            Celestrak is in play and the bulk catalog doesn't hold it."""
+            if not (allow_celestrak and have_catalog
+                    and src in ("celestrak", "file_then_celestrak")):
+                return False
+            if tle_sources.bulk_find(nid):
+                return False
+            if src == "file_then_celestrak":
+                try:
+                    if tle_sources.find_in_file(state["config"].get("tle_file", ""), nid):
+                        return False
+                except (FileNotFoundError, ValueError):
+                    pass
+            return True
+
+        def _offcatalog_stale(sat):
+            try:
+                age = (now - tle_sources.tle_epoch_dt(sat.get("tle_line1", ""))).total_seconds()
+                return not (0 <= age < OFFCATALOG_STALE_SEC)
+            except Exception:
+                return True
+
+        distinct, wanted, offcat = set(), {}, set()
+        for mod in modules.values():
+            for sat in mod.get("satellites", []):
+                nid = sat.get("norad_id")
+                if not nid:
+                    continue
+                distinct.add(nid)
+                if not _stale(sat):
+                    continue
+                if _needs_request(nid):
+                    # Decayed objects have no current elements; derelicts barely
+                    # change. Skip the former, rate-limit the latter.
+                    st = satcat.cached_status(nid)
+                    if ((st and st.get("decayed")) or not _offcatalog_stale(sat)
+                            or _time.time() - _offcat_get(nid) < OFFCATALOG_STALE_SEC):
+                        continue
+                    offcat.add(nid)
+                wanted.setdefault(nid, sat.get("name") or nid)
+
+        if offcat:
+            _offcat_mark(offcat)          # count the attempt even if Celestrak has nothing
+        results, failed, first_req = {}, [], True
+        for nid, name in wanted.items():
+            if nid in offcat:
+                if not first_req:
+                    _time.sleep(OFFCATALOG_SPACING)
+                first_req = False
+            res = tle_sources.resolve_tle(nid, state["config"],
+                                          allow_celestrak=allow_celestrak)
+            if res:
+                results[nid] = res
+            else:
+                failed.append(name)
+
+        improved, dirty = set(), set()
+        for mname, mod in modules.items():
+            for sat in mod.get("satellites", []):
+                res = results.get(sat.get("norad_id"))
+                if not res:
+                    continue
+                _, l1, l2 = res
+                if (sat.get("tle_line1"), sat.get("tle_line2")) == (l1, l2):
+                    continue
+                try:
+                    newer = (tle_sources.tle_epoch_dt(l1)
+                             > tle_sources.tle_epoch_dt(sat.get("tle_line1", "")))
+                except Exception:
+                    newer = True        # existing elements unreadable: take the new ones
+                if newer:
+                    sat["tle_line1"], sat["tle_line2"] = l1, l2
+                    improved.add(sat["norad_id"])
+                    dirty.add(mname)
+
+        for mname in dirty:
+            mod_mgr.save_module(modules[mname])
+        if active and active.get("name") in dirty:
+            _reload_records()
+
+        return {"updated": len(improved), "total": len(distinct),
+                "failed": failed, "modules": len(modules)}
 
 
 def _restore_active_module():
@@ -92,6 +264,7 @@ def api_info():
         "name":    APP_NAME,
         "version": APP_VERSION,
         "online":  state["online"],
+        "offline_mode": netmode.is_offline(),
         "config":  state["config"],
         "celestrak_blocked_until": celestrak.blocked_until(),   # unix ts, 0 if fine
     })
@@ -103,6 +276,8 @@ def api_info():
 def get_modules():
     modules = mod_mgr.list_modules()
     active  = (state["active_module"] or {}).get("name")
+    if active:
+        active = mod_mgr.canonical_name(active)     # same spelling the list and the URLs use
     return jsonify({"modules": modules, "active": active})
 
 
@@ -111,6 +286,10 @@ def create_module():
     name = (request.json or {}).get("name", "").strip()
     if not name:
         return jsonify({"error": "Name is required"}), 400
+    try:
+        name = mod_mgr.clean_name(name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     if name in mod_mgr.list_modules():
         return jsonify({"error": f"'{name}' already exists"}), 409
     mod = mod_mgr.create_module(name)
@@ -162,6 +341,10 @@ def rename_module(name):
     new_name = (request.json or {}).get("name", "").strip()
     if not new_name:
         return jsonify({"error": "New name is required"}), 400
+    try:
+        new_name = mod_mgr.clean_name(new_name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     mod = mod_mgr.rename_module(name, new_name)
     state["active_module"] = mod
     state["config"]["active_module"] = new_name
@@ -259,6 +442,15 @@ def search():
             results = []
         if results or source == "file":
             return jsonify({"results": results})
+
+    # Local copy of the Celestrak catalog (one bulk download, see
+    # tle_sources.refresh_bulk): a hit costs no Celestrak request at all. Only a
+    # miss (decayed / derelict / unknown) falls through to a single lookup below.
+    info = tle_sources.bulk_info()
+    if info["count"]:
+        hits, total = tle_sources.bulk_search(q)
+        if hits:
+            return jsonify({"results": hits, "total": total, "catalog": info})
 
     try:
         results = celestrak.search_tle(q)
@@ -553,24 +745,23 @@ def get_position_at(norad_id):
 
 @bp.route("/api/tle/refresh", methods=["POST"])
 def refresh_tle():
-    """Re-fetch TLEs for every satellite in the active module, using the
-    configured TLE source (Celestrak and/or a local file).
+    """Re-fetch TLEs for every satellite in EVERY module, using the configured
+    TLE source (Celestrak and/or a local file).
 
-    When the source can hit Celestrak, a manual refresh is gated to once per
-    TLE_MANUAL_COOLDOWN_SEC – Celestrak temporarily blocks IPs that request
-    more often than the data changes (~2 h). Pass {"force": true} to override
-    (the UI asks the user to confirm)."""
+    With Celestrak this is one bulk catalog download (``tle_sources.refresh_bulk``)
+    followed by a purely local update of all modules, so the request count does
+    not grow with the number of satellites. A manual refresh is still gated to
+    once per TLE_MANUAL_COOLDOWN_SEC – Celestrak temporarily blocks IPs that
+    request more often than the data changes (~2 h). Pass {"force": true} to
+    override (the UI asks the user to confirm)."""
     from backend.config import TLE_MANUAL_COOLDOWN_SEC
-    mod = state["active_module"]
-    if not mod:
-        return jsonify({"error": "No active module"}), 400
 
     force  = bool((request.json or {}).get("force"))
     src    = state["config"].get("tle_source", "celestrak")
     last   = float(state["config"].get("tle_last_refresh", 0) or 0)
     since  = _time.time() - last
     if (not force and src in ("celestrak", "file_then_celestrak")
-            and since < TLE_MANUAL_COOLDOWN_SEC):
+            and not netmode.is_offline() and since < TLE_MANUAL_COOLDOWN_SEC):
         wait_min = int((TLE_MANUAL_COOLDOWN_SEC - since) / 60) + 1
         return jsonify({
             "cooldown": True,
@@ -581,43 +772,124 @@ def refresh_tle():
                       f"more, or force it anyway."),
         }), 429
 
-    sats    = mod.get("satellites", [])
-    updated = 0
-    failed  = []
+    # Re-download the URL sources (a LAN server, say); files / folders are read live.
+    sources_res = []
+    if src in ("file", "file_then_celestrak"):
+        sources_res = tle_sources.refresh_url_sources(state["config"].get("tle_file", ""))
 
     # One up-front check: if Celestrak can't be reached, skip it (going straight
-    # to the cached SatNOGS catalog) instead of eating a ~20 s timeout per sat.
+    # to the local catalogs) instead of eating a long timeout per request.
     allow_ct = (src == "file") or celestrak.celestrak_up()
 
-    for sat in sats:
-        norad = sat["norad_id"]
-        result = tle_sources.resolve_tle(norad, state["config"], allow_celestrak=allow_ct)
-        if not result:
-            failed.append(sat["name"])
-            continue
-        # Only count it as an update if the element set actually got newer.
-        try:
-            old_ep = tle_sources.tle_epoch_dt(sat.get("tle_line1", ""))
-            new_ep = tle_sources.tle_epoch_dt(result[1])
-            newer = new_ep > old_ep
-        except Exception:
-            newer = True
-        sat["tle_line1"], sat["tle_line2"] = result[1], result[2]
-        if newer:
-            updated += 1
+    # One request refreshes the whole catalog; every module is then updated
+    # from that local copy.
+    bulk = {"refreshed": False, "count": 0}
+    if src in ("celestrak", "file_then_celestrak") and allow_ct:
+        bulk = tle_sources.refresh_bulk(force=True)
 
-    if updated:
-        mod_mgr.save_module(mod)
-        _reload_records()
+    resp = update_all_module_tles(allow_celestrak=allow_ct, only_stale=False)
 
     state["config"]["tle_last_refresh"] = _time.time()
     mod_mgr.save_config(state["config"])
 
-    resp = {"updated": updated, "failed": failed, "total": len(sats)}
-    if celestrak.is_blocked():
-        resp["note"] = ("Celestrak is rate-limiting this IP – used cached / "
-                        "SatNOGS elements where possible.")
+    resp["catalog"] = bulk
+    resp["sources"] = sources_res
+    note = ""
+    if netmode.is_offline():
+        note = "Offline station mode – used local sources and data only."
+    elif celestrak.is_blocked():
+        note = ("Celestrak is rate-limiting this IP – used cached / "
+                "SatNOGS elements where possible.")
+    elif src in ("celestrak", "file_then_celestrak") and not bulk["refreshed"]:
+        note = "Could not download the Celestrak catalog – used cached elements."
+    bad = [r for r in sources_res if not r["ok"]]
+    if bad:
+        note = (note + "  " if note else "") + "TLE source failed: " + "; ".join(
+            f"{r['source']} ({r['error']})" for r in bad)
+    if note:
+        resp["note"] = note
     return jsonify(resp)
+
+
+@bp.route("/api/tle/sources")
+def tle_sources_status():
+    """Status of every line of the TLE-sources setting (no download)."""
+    return jsonify({"sources": tle_sources.sources_status(state["config"].get("tle_file", ""))})
+
+
+@bp.route("/api/tle/sources/refresh", methods=["POST"])
+def tle_sources_refresh():
+    """Re-download the URL lines of the TLE sources and report each source's
+    status. Body {spec} lets the Settings dialog check the text it shows before
+    it has been saved; without it the saved setting is used."""
+    spec = (request.json or {}).get("spec")
+    if spec is None:
+        spec = state["config"].get("tle_file", "")
+    fetched = {r["source"]: r for r in tle_sources.refresh_url_sources(spec)}
+    rows = tle_sources.sources_status(spec)
+    for row in rows:
+        r = fetched.get(row["source"])
+        if r is not None:
+            row["fetched_ok"] = r["ok"]
+            if not r["ok"]:
+                row["error"] = r["error"] + (" – using the last copy" if row["count"] else "")
+    return jsonify({"sources": rows})
+
+
+@bp.route("/api/datapack/export")
+def export_datapack():
+    """The offline data pack (SatNOGS satellites / transmitters / tle) as a ZIP.
+    ``?refresh=1`` (default) downloads fresh lists first."""
+    import json
+    from flask import Response
+    refresh = request.args.get("refresh", "1") == "1"
+    try:
+        blob, manifest = datapack.build_pack(refresh=refresh)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 503
+    fname = f"kepler73_datapack_{manifest['created'][:10]}.zip"
+    info = {k: manifest[k] for k in ("data_fetched", "refreshed", "counts")}
+    info["offline"] = netmode.is_offline()
+    return Response(blob, mimetype="application/zip", headers={
+        "Content-Disposition": f'attachment; filename="{fname}"',
+        "X-Datapack-Info": json.dumps(info),
+    })
+
+
+@bp.route("/api/datapack/import", methods=["POST"])
+def import_datapack():
+    """Install an offline data pack (ZIP) or one raw SatNOGS API JSON list."""
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "No file uploaded"}), 400
+    raw = f.read(datapack.MAX_UPLOAD_BYTES + 1)
+    try:
+        result = datapack.install(raw)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, **result})
+
+
+@bp.route("/api/update-check")
+def update_check():
+    """Is there a newer version on GitHub? (About dialog button; never in
+    offline-station mode.) Always answers 200 with {update_available, latest, error, ...}."""
+    return jsonify(updatecheck.check())
+
+
+@bp.route("/api/datapack/info")
+def datapack_info():
+    """What SatNOGS data is on this computer and how old it is."""
+    return jsonify(datapack.info())
+
+
+@bp.route("/api/tle/catalog")
+def tle_catalog_info():
+    """Status of the local bulk copy of the Celestrak catalog (what search and
+    "Update all TLEs" work from): {count, fetched, age_sec, groups}."""
+    return jsonify(tle_sources.bulk_info())
+
+
 
 @bp.route("/api/tle/export")
 def export_tle():
@@ -658,14 +930,99 @@ def export_tle():
 
 @bp.route("/api/transmitters/<norad_id>")
 def get_transmitters(norad_id):
-    """Returns cached transponder list from SatNOGS for a satellite."""
+    """Transponder list for a satellite: the user's own manual entries first
+    (flagged ``manual: true``, kept in data/custom_transponders.json so a SatNOGS
+    refresh never touches them), then the cached SatNOGS list."""
     from backend.satnogs import get_transponders
+    from backend import userdata
     force = request.args.get("refresh", "0") == "1"
     try:
-        data = get_transponders(norad_id, force_refresh=force)
-        return jsonify(data)
+        satnogs_list = get_transponders(norad_id, force_refresh=force)
     except Exception as e:
-        return jsonify({"error": str(e)}), 503
+        print(f"[Kepler73] transponder lookup failed for {norad_id}: {e}")
+        satnogs_list = []
+    return jsonify(userdata.custom_tx(norad_id) + satnogs_list)
+
+
+@bp.route("/api/transmitters/<norad_id>/custom", methods=["POST"])
+def save_custom_transmitter(norad_id):
+    """Add (or, with ``uuid`` in the body, update) a manual transponder.
+    Frequencies are in MHz: downlink_mhz / downlink_high_mhz / uplink_mhz /
+    uplink_high_mhz, plus description, mode, baud, invert, active, note."""
+    from backend import userdata
+    try:
+        tx = userdata.save_custom_tx(norad_id, request.json or {})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, "tx": tx})
+
+
+@bp.route("/api/transmitters/<norad_id>/custom/<tx_uuid>", methods=["DELETE"])
+def delete_custom_transmitter(norad_id, tx_uuid):
+    from backend import userdata
+    if not userdata.delete_custom_tx(norad_id, tx_uuid):
+        return jsonify({"error": "Not found"}), 404
+    return jsonify({"ok": True})
+
+
+# ── Satellite notes ("check this signal", "of interest") ────
+
+@bp.route("/api/notes")
+def get_notes():
+    from backend import userdata
+    return jsonify(userdata.get_notes())
+
+
+@bp.route("/api/notes/<norad_id>", methods=["POST"])
+def set_note(norad_id):
+    """Body {text, flag}. A blank text removes the note."""
+    from backend import userdata
+    data = request.json or {}
+    note = userdata.set_note(norad_id, data.get("text", ""), bool(data.get("flag")))
+    return jsonify({"ok": True, "note": note})
+
+
+# ── Export / import of everything the user entered ──────────
+
+def _known_names() -> dict:
+    names = {}
+    for mname in mod_mgr.list_modules():
+        try:
+            for s in mod_mgr.load_module(mname).get("satellites", []):
+                names[str(s.get("norad_id"))] = s.get("name", "")
+        except FileNotFoundError:
+            continue
+    return names
+
+
+@bp.route("/api/userdata/export")
+def export_userdata():
+    """Manual transponders + notes as one JSON download, to move to another
+    computer (re-import there with POST /api/userdata/import)."""
+    import json
+    from flask import Response
+    from backend import userdata
+    doc = userdata.export_all(_known_names())
+    return Response(json.dumps(doc, indent=2, ensure_ascii=False),
+                    mimetype="application/json",
+                    headers={"Content-Disposition":
+                             'attachment; filename="kepler73_userdata.json"'})
+
+
+@bp.route("/api/userdata/import", methods=["POST"])
+def import_userdata():
+    """Merge an exported user-data file (multipart ``file=`` or a JSON body)."""
+    import json
+    from backend import userdata
+    try:
+        if request.files.get("file"):
+            raw = request.files["file"].read(2_000_000)
+            doc = json.loads(raw.decode("utf-8-sig"))
+        else:
+            doc = request.get_json(silent=True)
+        return jsonify({"ok": True, **userdata.import_all(doc)})
+    except (ValueError, UnicodeDecodeError) as e:
+        return jsonify({"error": f"Could not import: {e}"}), 400
 
 
 @bp.route("/api/satnogs/catalog")
@@ -677,6 +1034,140 @@ def satnogs_catalog():
         return jsonify(get_catalog(force_refresh=request.args.get("refresh") == "1"))
     except Exception as e:
         return jsonify({"error": f"SatNOGS unavailable: {e}"}), 503
+
+
+# ── Radio / CAT control (Hamlib rigctld) ────────────────────
+
+# app_config key  ->  rig_cfg key
+_RIG_CFG_KEYS = {
+    "rig_enabled":     "enabled",
+    "rig_host":        "host",
+    "rig_port":        "port",
+    "rig_down_hz":     "down_hz",
+    "rig_up_hz":       "up_hz",
+    "rig_tx_doppler":  "tx_enabled",
+    "rig_deadband_hz": "deadband_hz",
+    "rig_bands":       "bands",
+}
+
+
+@bp.route("/api/rig/config", methods=["GET"])
+def get_rig_config():
+    from api.sockets import rig_cfg, rig_status
+    return jsonify({"config": rig_cfg, "status": rig_status})
+
+
+@bp.route("/api/rig/config", methods=["POST"])
+def set_rig_config():
+    """Update the live CAT config and mirror it into app_config.json so it
+    survives a restart. Body keys match rig_cfg (host, port, down_hz, up_hz,
+    tx_enabled, deadband_hz, enabled)."""
+    from api.sockets import apply_rig_cfg, rig_cfg
+    apply_rig_cfg(request.json or {})
+    for cfg_key, rig_key in _RIG_CFG_KEYS.items():
+        state["config"][cfg_key] = rig_cfg[rig_key]
+    mod_mgr.save_config(state["config"])
+    return jsonify({"ok": True, "config": rig_cfg})
+
+
+@bp.route("/api/rig/test", methods=["POST"])
+def test_rig():
+    """One-shot connect to a rigctld and read the current frequency. Returns a
+    raw ``probe`` so a silent/odd rigctld can be diagnosed from the UI."""
+    from backend.hamlib import RigctldClient
+    data = request.json or {}
+    host = str(data.get("host") or "127.0.0.1").strip()
+    try:
+        port = int(data.get("port") or 4532)
+    except (TypeError, ValueError):
+        port = 4532
+    c = RigctldClient(host, port, timeout=2.5)
+    ok, detail = c.ping()
+    probe = c.probe()
+    c.close()
+    return jsonify({"ok": ok, "detail": detail, "probe": probe})
+
+
+# ── Rotator control (Hamlib rotctld) ────────────────────────
+
+# app_config key  ->  rot_cfg key
+_ROT_CFG_KEYS = {
+    "rot_enabled":     "enabled",
+    "rot_host":        "host",
+    "rot_port":        "port",
+    "rot_min_el":      "min_el",
+    "rot_park_az":     "park_az",
+    "rot_park_el":     "park_el",
+    "rot_az_deadband": "az_deadband",
+    "rot_el_deadband": "el_deadband",
+}
+
+
+def _persist_rot_cfg(rot_cfg):
+    for cfg_key, rot_key in _ROT_CFG_KEYS.items():
+        state["config"][cfg_key] = rot_cfg[rot_key]
+    mod_mgr.save_config(state["config"])
+
+
+@bp.route("/api/rotor/config", methods=["GET"])
+def get_rotor_config():
+    from api.sockets import rot_cfg, rot_status
+    return jsonify({"config": rot_cfg, "status": rot_status})
+
+
+@bp.route("/api/rotor/config", methods=["POST"])
+def set_rotor_config():
+    """Update the live rotor config and mirror it to app_config.json. Body keys
+    match rot_cfg (host, port, min_el, park_az, park_el, az_deadband,
+    el_deadband, enabled)."""
+    from api.sockets import apply_rot_cfg, rot_cfg
+    apply_rot_cfg(request.json or {})
+    _persist_rot_cfg(rot_cfg)
+    return jsonify({"ok": True, "config": rot_cfg})
+
+
+@bp.route("/api/rotor/test", methods=["POST"])
+def test_rotor():
+    from backend.rotctld import RotctldClient
+    data = request.json or {}
+    host = str(data.get("host") or "127.0.0.1").strip()
+    try:
+        port = int(data.get("port") or 4533)
+    except (TypeError, ValueError):
+        port = 4533
+    c = RotctldClient(host, port, timeout=2.5)
+    ok, detail = c.ping()
+    probe = c.probe()
+    c.close()
+    return jsonify({"ok": ok, "detail": detail, "probe": probe})
+
+
+@bp.route("/api/rotor/park", methods=["POST"])
+def rotor_park():
+    """Halt tracking and drive the rotor to the configured park position."""
+    from api.sockets import apply_rot_cfg, rot_cfg
+    from backend.rotctld import RotctldClient
+    apply_rot_cfg({"enabled": False})
+    _persist_rot_cfg(rot_cfg)
+    c = RotctldClient(rot_cfg["host"], rot_cfg["port"], timeout=2.5)
+    ok = c.set_pos(float(rot_cfg["park_az"]), float(rot_cfg["park_el"]))
+    err = c.last_error
+    c.close()
+    return jsonify({"ok": bool(ok), "error": err})
+
+
+@bp.route("/api/rotor/stop", methods=["POST"])
+def rotor_stop():
+    """Halt tracking and send the rotator a stop command (leave it where it is)."""
+    from api.sockets import apply_rot_cfg, rot_cfg
+    from backend.rotctld import RotctldClient
+    apply_rot_cfg({"enabled": False})
+    _persist_rot_cfg(rot_cfg)
+    c = RotctldClient(rot_cfg["host"], rot_cfg["port"], timeout=2.5)
+    ok = c.stop()
+    err = c.last_error
+    c.close()
+    return jsonify({"ok": bool(ok), "error": err})
 
 
 # ── Settings ──────────────────────────────────────────────────
@@ -708,6 +1199,9 @@ def save_config():
             state["config"]["tle_source"] = src
     if "tle_file" in data:
         state["config"]["tle_file"] = str(data["tle_file"]).strip()
+    if "offline_mode" in data:
+        state["config"]["offline_mode"] = bool(data["offline_mode"])
+        netmode.set_offline(state["config"]["offline_mode"])
     mod_mgr.save_config(state["config"])
     return jsonify({"ok": True, "config": state["config"]})
 
@@ -799,6 +1293,8 @@ def tile(layer, z, x, y):
 
 def _fetch_tile(layer, z, x, y):
     import urllib.request
+    if netmode.is_offline():
+        return None
     try:
         if layer == "satellite":
             url = (f"https://server.arcgisonline.com/ArcGIS/rest/services/"
@@ -806,7 +1302,7 @@ def _fetch_tile(layer, z, x, y):
         else:
             url = f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"
         req = urllib.request.Request(
-            url, headers={"User-Agent": "Kepler73/0.3 (amateur radio)"})
+            url, headers={"User-Agent": "Kepler73/0.4 (amateur radio)"})
         with urllib.request.urlopen(req, timeout=6) as r:
             return r.read()
     except Exception:
