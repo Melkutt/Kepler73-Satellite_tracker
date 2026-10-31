@@ -1,5 +1,6 @@
 // Kepler73 - rotor.js
 // Az/El rotator (Hamlib rotctld) tracking dialog + live status readout.
+// Also feeds the rotor overlay of the polar view (polarmap.js setRotorView).
 
 var _rotEnabled = false;
 
@@ -17,6 +18,9 @@ function showRotorDialog() {
       document.getElementById('rot-parkel').value = c.park_el || 0;
       document.getElementById('rot-azdb').value   = (c.az_deadband != null) ? c.az_deadband : 2;
       document.getElementById('rot-eldb').value   = (c.el_deadband != null) ? c.el_deadband : 2;
+      document.getElementById('rot-showpolar').checked = c.show_polar !== false;
+      document.getElementById('rot-showbeam').checked  = c.show_beam !== false;
+      document.getElementById('rot-beamw').value  = (c.beamwidth != null) ? c.beamwidth : 20;
       _rotEnabled = !!c.enabled;
       _rotReflectToggle();
       document.getElementById('rot-msg').textContent = '';
@@ -33,9 +37,20 @@ function _rotFormCfg() {
     park_az:     parseFloat(document.getElementById('rot-parkaz').value) || 0,
     park_el:     parseFloat(document.getElementById('rot-parkel').value) || 0,
     az_deadband: parseFloat(document.getElementById('rot-azdb').value) || 0,
-    el_deadband: parseFloat(document.getElementById('rot-eldb').value) || 0
+    el_deadband: parseFloat(document.getElementById('rot-eldb').value) || 0,
+    show_polar:  document.getElementById('rot-showpolar').checked,
+    show_beam:   document.getElementById('rot-showbeam').checked,
+    beamwidth:   parseFloat(document.getElementById('rot-beamw').value) || 20
   };
 }
+
+// Apply the polar-view options at once (on every POST, not only after a reload).
+function _rotApplyView(c) {
+  if (typeof setRotorView !== 'function' || !c) return;
+  setRotorView({ show: c.show_polar !== false, beam: c.show_beam !== false,
+                 beamwidth: (c.beamwidth != null) ? c.beamwidth : 20 });
+}
+
 
 function _rotPost(extra, cb) {
   var body = _rotFormCfg();
@@ -46,7 +61,7 @@ function _rotPost(extra, cb) {
     body: JSON.stringify(body)
   })
     .then(function (r) { return r.json(); })
-    .then(function (d) { if (cb) cb(d); })
+    .then(function (d) { _rotApplyView(d.config); if (cb) cb(d); })
     .catch(function () {
       var m = document.getElementById('rot-msg');
       if (m) { m.textContent = '⚠ could not reach Kepler73'; m.style.color = 'var(--warn)'; }
@@ -139,6 +154,11 @@ function _fmtAzEl(az, el) {
 function updateRotorStatus(s) {
   _rotEnabled = !!s.enabled;
 
+  if (typeof setRotorView === 'function') {
+    setRotorView({ enabled: !!s.enabled, connected: !!s.connected, posOk: !!s.pos_ok,
+                   az: s.rot_az || 0, el: s.rot_el || 0 });
+  }
+
   // Status-bar chip
   var chip = document.getElementById('sb-rot');
   if (chip) {
@@ -171,3 +191,9 @@ function updateRotorStatus(s) {
     : (s.connected ? 'connected' : (s.error || 'no connection'));
   link.style.color = s.connected ? 'var(--accent)' : (s.enabled ? 'var(--warn)' : 'var(--fg-dim)');
 }
+
+// Load the polar-view options once at start-up.
+fetch('/api/rotor/config')
+  .then(function (r) { return r.json(); })
+  .then(function (d) { _rotApplyView(d.config); })
+  .catch(function () {});

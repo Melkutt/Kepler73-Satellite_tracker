@@ -1,18 +1,19 @@
 # 🛰 Kepler73
 
-**A real-time satellite tracking application for amateur radio operators.** &nbsp; `v0.4`
+**A real-time satellite tracking application for amateur radio operators.** &nbsp; `v0.5`
 
 Built by SA1CKW with help of AI — designed for practical use at the radio shack.
 
-> ⚠ **Radio (CAT) and rotator control are new and have _not_ been tested on real hardware.**
-> Use them at your own risk. Try Hamlib's dummy devices first (`rigctld -m 1`, `rotctld -m 1`)
-> and keep the **STOP ROTOR** button within reach. Everything else has been used for real.
+> ⚠ **Radio (CAT) and rotator control – and therefore auto-track's use of them – are new and have
+> _not_ been tested on real hardware.** Use them at your own risk. Try Hamlib's dummy devices first
+> (`rigctld -m 1`, `rotctld -m 1`) and keep the **STOP ROTOR** button within reach. Everything else
+> has been used for real.
 
 ---
 
 ## Overview
 
-Kepler73 is a web-based satellite tracker that runs locally on your machine. It uses SGP4 orbital mechanics to compute real-time satellite positions, predict upcoming passes, and assist with amateur radio satellite operations — Doppler correction (shown, and optionally sent to your radio through Hamlib), pass alarms, and az/el output for a rotator.
+Kepler73 is a web-based satellite tracker that runs locally on your machine. It uses SGP4 orbital mechanics to compute real-time satellite positions, predict upcoming passes, and assist with amateur radio satellite operations — Doppler correction (shown, and optionally sent to your radio through Hamlib), pass alarms, az/el output for a rotator, and **auto-track** that picks the passes worth recording by itself.
 
 The interface runs in your browser, but everything is computed locally. No cloud, no account, no ads. It can also run on a station that **never** sees the internet (see [Offline station](#-offline-station)).
 
@@ -25,7 +26,8 @@ The interface runs in your browser, but everything is computed locally. No cloud
 - A **built-in world map** (Natural Earth, public domain) is drawn underneath, so there is always a
   map — even on a computer that has never been online and has no cached tiles
 - Ground tracks for all active satellites; extended 3-orbit track for the selected one
-- Footprint circle showing coverage area
+- Footprint showing the coverage area, drawn as the **true great-circle outline** – correct at
+  high latitudes, over the poles and across the date line (not Leaflet's Mercator ellipse)
 - Observer marker at your configured location
 - **Track** checkbox per satellite — keep one satellite centred while the map pans under it
 - Decayed / re-entered objects are greyed out and struck through, and get no marker
@@ -52,12 +54,22 @@ The interface runs in your browser, but everything is computed locally. No cloud
   geostationary (all / only / hide), "GEO above my horizon" (from your QTH),
   downlink/uplink, active-only
 - Chip groups for modulation / service / type / country that grey out values with zero matches
+- **Click a column header to sort** (NORAD, MHz, …; click again to reverse – ▲/▼ shows which)
+- Separate **Satellite** status (in orbit / not launched / re-entered) and **Tx** status. SatNOGS
+  registers transmitters for satellites that are not launched yet under temporary 98xxx / 99xxx
+  NORAD IDs; those rows are dimmed with ⊘ (no orbital elements exist, so they can't be tracked) and
+  *Active only* leaves them out
 - One click adds a satellite to the active module
 
 ### 🧭 Polar View
 - Real-time azimuth/elevation strobe pointing toward the selected satellite
 - Dot appears when the satellite rises above the horizon
 - Live AZ / EL readout and N/E/S/W compass rose
+- Satellites without a current element set (years-old TLEs of decayed objects) are not planned by
+  auto-track; the dialog shows each satellite's element age
+- With the rotator on: a solid green strobe and ring show where the antenna **actually** points,
+  and an optional wedge shows the antenna beam (set the −3 dB beamwidth in the rotator dialog).
+  Both can be switched off there. Grey and dashed = link to `rotctld` lost.
 
 ### ⏱ Pass Prediction & Simulator
 - Next-pass AOS/LOS, max elevation, azimuths, compass directions, duration, peak Doppler
@@ -87,10 +99,31 @@ The interface runs in your browser, but everything is computed locally. No cloud
 - The status bar shows the tuned frequency, **mode and passband** read back from the radio
 - Not yet: TX Doppler, split operation and PTT
 
+### ⏺ Auto-track passes (for recording weather / SSTV / SSDV signals)
+- Satellites ▸ **Auto-track passes…**: tick satellites from **any of your modules**, each with its
+  own minimum *maximum elevation* (or one default, e.g. 20° for weather satellites, 10° for SSTV/SSDV)
+- For every pass that reaches it, Kepler73 selects the satellite shortly before AOS (switching
+  module if needed), switches the rotor on, tunes CAT Doppler to the downlink you gave that
+  satellite, and runs **your own start / end command** – typically a script that starts and stops an
+  SDR recording. The command is started directly (no shell); the satellite, times and max elevation
+  come as `{sat}`, `{max_el}`, `{aos}` … placeholders and `K73_*` environment variables
+- Satellites whose element set (TLE) is older than a limit (default 30 days) are **ignored**: a
+  years-old TLE – typical for objects that have decayed – propagates to nonsense and would produce
+  "passes" that crowd out the real satellites. The dialog shows each satellite's element age
+- A pass that is already in progress when you switch auto-track on is started at once; a pass that
+  ended is never started again. The satellite you pick by hand stays selected until the next
+  automatic pass starts
+- Overlapping passes: the one with the higher elevation wins. The dialog previews the next 24 h
+  and shows which passes will be tracked and which are skipped, and why. The status bar shows the
+  running or next pass. Off by default; the rotor and CAT parts are untested on real hardware
+- The settings that contain a command line can only be changed from a page served by
+  `127.0.0.1` / `localhost`
+
 ### 📡 Rotator control &nbsp; ⚠ untested on real hardware
 - Points a Hamlib **`rotctld`** at the selected satellite; tracks above a configurable elevation,
   parks below it, with a deadband so the rotator isn't re-commanded for tiny moves
-- **Park** and a big red **STOP ROTOR** button, live commanded-vs-actual az/el
+- **Park** and a big red **STOP ROTOR** button, live commanded-vs-actual az/el, and the pointing
+  drawn in the polar view
 - Not yet: pre-positioning before AOS, north-crossing / flip handling
 
 ### 🌍 Offline station
@@ -124,6 +157,19 @@ Kepler73 can run on a computer that never gets internet access:
 
 ![Main view](docs/img/01-main.png)
 
+**Auto-track at work** — a NOAA pass is being tracked by itself: the status bar shows the running pass
+and the Doppler-corrected frequency, the polar view shows the satellite (yellow, dashed) and where
+the rotator really points (solid green strobe, ring and beam wedge), and the footprint follows the
+real shape of the coverage area.
+
+![Auto-track in action](docs/img/12-main-rotor-auto.jpg)
+
+**Auto-track passes** — tick satellites from any module, a threshold per satellite, an optional
+downlink for CAT, your own start / end commands, and a 24-hour preview that shows which passes will
+be tracked and which are skipped (and why).
+
+![Auto-track dialog](docs/img/10-auto-track.jpg)
+
 **Transponders, notes and CAT** — the panel pinned beside the map: a single selected transponder,
 a `✎ manual` entry of your own, transponders outside the radio's bands greyed out, a note on the
 satellite, and the CAT strip. The status bar shows the tuned frequency, mode and passband.
@@ -134,7 +180,8 @@ satellite, and the CAT strip. The status bar shows the tuned frequency, mode and
 
 ![Radio / CAT dialog](docs/img/05-radio-cat.jpg)
 
-**Rotator** — tracking through `rotctld` (here Hamlib's dummy rotator), with Park and STOP.
+**Rotator** — tracking through `rotctld` (here Hamlib's dummy rotator), with Park and STOP, and
+options for how the rotator is drawn in the polar view (antenna beamwidth, beam on/off).
 
 ![Rotator dialog](docs/img/06-rotator.jpg)
 
@@ -142,7 +189,7 @@ satellite, and the CAT strip. The status bar shows the tuned frequency, mode and
 
 ![Settings: TLE sources and offline station](docs/img/07-settings-offline.jpg)
 
-**Satellites menu** — export / import your own transponders & notes, and the offline data pack.
+**Satellites menu** — auto-track, export / import your own transponders & notes, and the offline data pack.
 
 ![Satellites menu](docs/img/09-menu-datapack.jpg)
 
@@ -151,17 +198,18 @@ satellite, and the CAT strip. The status bar shows the tuned frequency, mode and
 ![About dialog](docs/img/08-about.jpg)
 
 **SatNOGS lookup** — faceted filtering (modulation / service / type / country / frequency /
-geostationary) over the whole SatNOGS catalogue; the ＋ button adds a satellite to the
-active module.
+geostationary) over the whole SatNOGS catalogue, sortable columns, and satellite status. Here the
+145–146 MHz downlinks with the highest NORAD IDs first: satellites that are *not launched* or have
+*re-entered* are dimmed with ⊘; the ＋ button adds the others to the active module.
 
-![SatNOGS lookup](docs/img/02-satnogs-lookup.png)
+![SatNOGS lookup](docs/img/11-satnogs-lookup.jpg)
 
 **Observer settings** — set your location by dragging the pin or searching a place name;
 ground elevation is filled in automatically.
 
 ![Observer settings map picker](docs/img/03-observer-map.png)
 
-<sub>The v0.4 screenshots were taken with demo data and Hamlib's dummy rig and rotator — not real hardware.</sub>
+<sub>The screenshots were taken with demo data and Hamlib's dummy rig and rotator — not real hardware.</sub>
 
 ---
 
@@ -239,9 +287,12 @@ The single-file `dist\Kepler73.exe` is what goes on the Releases page.
 - [ ] Test CAT and rotor on real hardware
 - [ ] CAT: TX Doppler, split operation, PTT
 - [ ] Rotor: pre-position before AOS, north-crossing / flip, direct EasyComm backend
+- [x] Auto-track passes: pick satellites + elevation threshold, start/end commands for recording **(rotor / CAT parts untested on real hardware)**
+- [x] Footprint drawn as the true great-circle outline
 - [x] Leaflet and socket.io bundled locally (works with no internet at all)
 - [x] Built-in offline world map (Natural Earth)
 - [ ] Export / import of cached map tiles ("map pack") for detail on the offline station
+- [ ] Auto-track: ready-made recording scripts for common SDR programs
 - [ ] Telemetry decoding / waterfall (idea — via a companion tool and `rigctld`)
 - [ ] macOS and Linux builds of the executable
 

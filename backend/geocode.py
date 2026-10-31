@@ -24,7 +24,7 @@ CACHE_MAX_AGE = 180 * 86400   # geography does not move
 
 os.makedirs(GEOCODE_DIR, exist_ok=True)
 
-_UA = {"User-Agent": "Kepler73/0.4 (amateur radio satellite tracker)"}
+_UA = {"User-Agent": "Kepler73/0.5 (amateur radio satellite tracker)"}
 
 
 def _cache_get(key: str):

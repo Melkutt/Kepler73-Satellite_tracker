@@ -34,7 +34,7 @@ def _cache_age(norad_id: str) -> float:
 def _fetch_from_api(norad_id: str) -> list:
     """Fetch transponder list from SatNOGS API."""
     url = f"{SATNOGS_URL}?format=json&satellite__norad_cat_id={norad_id}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.4"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.5"})
     with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as resp:
         return json.loads(resp.read().decode())
 
@@ -209,7 +209,7 @@ def _fetch_db_list(endpoint: str, refresh: bool = False, network: bool = True) -
                            f"offline data pack (Satellites menu) or go online once")
     url = f"{API_BASE}/{endpoint}/?format=json"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.4"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.5"})
         with urllib.request.urlopen(req, timeout=90) as r:
             data = json.loads(r.read())
         with open(path, "w", encoding="utf-8") as f:
@@ -338,6 +338,42 @@ def _catalog_tle_map() -> dict:
         except Exception:
             globals()["_tle_map_cache"] = (mtime, {})
     return _tle_map_cache[1]
+
+
+_status_cache: tuple = (0.0, {})    # (satellites.json mtime, {norad: (name, status)})
+
+
+def sat_status(norad_id):
+    """(name, status) of a satellite from the cached SatNOGS satellite list, or None.
+    ``status`` is SatNOGS's own: "in orbit", "future" (not launched - typically a
+    temporary 98xxx / 99xxx NORAD ID) or "re-entered". Reads the cache only."""
+    path = _db_path("satellites.json")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    if _status_cache[0] != mtime:
+        table = {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for s in json.load(f):
+                    if s.get("norad_cat_id") is not None:
+                        table[str(s["norad_cat_id"])] = (s.get("name") or "", s.get("status") or "")
+        except Exception:
+            pass
+        globals()["_status_cache"] = (mtime, table)
+    return _status_cache[1].get(str(norad_id).strip())
+
+
+def no_elements_reason(norad_id) -> str:
+    """Why a satellite has no orbital elements, in words (for the "could not add" message)."""
+    st = sat_status(norad_id)
+    if st and st[1] == "future":
+        return ("%s has not been launched yet (SatNOGS lists it as 'future' under a temporary NORAD ID), "
+                "so no orbital elements exist for it. Its transmitters are registered in advance." % (st[0] or norad_id))
+    if st and st[1] == "re-entered":
+        return "%s has re-entered the atmosphere (SatNOGS status 're-entered'): there are no current orbital elements." % (st[0] or norad_id)
+    return "No orbital elements found for NORAD %s" % norad_id
 
 
 def catalog_tle(norad_id):

@@ -11,6 +11,9 @@ var _snSel    = { mode: new Set(), service: new Set(), type: new Set(), country:
 var _snSort   = { col: 'norad', rev: false };
 var _snWired  = false;
 var SN_ROW_CAP = 400;
+// Sortable columns, in header order (the last <th> is the add button). Header clicks are wired
+// ONLY inside #dlg-satnogs: other dialogs reuse the .sn-table class and must not be touched.
+var _SN_COLS = ['norad', 'name', 'dir', 'mhz', 'mode', 'service', 'type', 'satst', 'txst', '_geoEl'];
 
 var _SN_FACET_EL = {
   mode: 'sn-f-mode', service: 'sn-f-service', type: 'sn-f-type', country: 'sn-f-country'
@@ -27,10 +30,11 @@ function showSatnogsDialog() {
     ['sn-geo', 'sn-geovis', 'sn-down', 'sn-up', 'sn-active'].forEach(function(id) {
       document.getElementById(id).addEventListener('change', snApply);
     });
-    document.querySelectorAll('.sn-table th').forEach(function(th, i) {
-      var cols = ['norad', 'name', 'dir', 'mhz', 'mode', 'service', 'type', 'satst', '_geoEl'];
-      if (i < cols.length) th.style.cursor = 'pointer';
-      if (i < cols.length) th.onclick = function() { snSortBy(cols[i]); };
+    document.querySelectorAll('#dlg-satnogs .sn-table th').forEach(function(th, i) {
+      if (i >= _SN_COLS.length) return;
+      th.classList.add('sn-sortable');
+      th.title = (th.title ? th.title + ' - ' : '') + 'Click to sort (click again to reverse)';
+      th.onclick = function() { snSortBy(_SN_COLS[i]); };
     });
   }
   if (!_snRows) satnogsFetch(false);
@@ -130,10 +134,18 @@ function _snBase(rows) {
     if (geoVis && r.geo === 'Yes' && !(r._geoEl != null && r._geoEl > 0)) return false;
     if (wantD && !wantU && r.dir !== 'Downlink') return false;
     if (wantU && !wantD && r.dir !== 'Uplink') return false;
-    if (activeOnly && !(r.txst === 'active' && r.satst !== 'decayed')) return false;
+    if (activeOnly && !(r.txst === 'active' && !_snNoElements(r))) return false;
     return true;
   });
 }
+
+// SatNOGS lists transmitters of satellites that are not in orbit: 'future' = not launched yet
+// (temporary 98xxx / 99xxx NORAD id, no element set exists), 're-entered' = gone.
+function _snNoElements(r) {
+  return r.satst === 'future' || r.satst === 're-entered' || r.satst === 'decayed';
+}
+
+var _SN_SAT_LABEL = { 'in orbit': 'in orbit', 'future': 'not launched', 're-entered': 're-entered' };
 
 function _snSelFilter(rows, use) {
   return rows.filter(function(r) {
@@ -217,6 +229,11 @@ function _snRenderTable(rows) {
     Array.from(document.querySelectorAll('.sat-item')).map(function(el) { return el.dataset.norad; })
   );
 
+  document.querySelectorAll('#dlg-satnogs .sn-table th').forEach(function(th, i) {
+    th.classList.remove('sort-asc', 'sort-desc');
+    if (_SN_COLS[i] === _snSort.col) th.classList.add(_snSort.rev ? 'sort-desc' : 'sort-asc');
+  });
+
   var tb = document.getElementById('sn-tbody');
   tb.innerHTML = '';
   var shown = rows.slice(0, SN_ROW_CAP);
@@ -235,13 +252,20 @@ function _snRenderTable(rows) {
       '<td>' + _snEsc(r.mode) + '</td>' +
       '<td>' + _snEsc(r.service) + '</td>' +
       '<td>' + _snEsc(r.type) + '</td>' +
+      '<td class="sn-st-' + String(r.satst).replace(/\W+/g, '') + '">' + _snEsc(_SN_SAT_LABEL[r.satst] || r.satst) + '</td>' +
       '<td>' + _snEsc(r.txst) + '</td>' +
       '<td>' + (r._geoEl != null
                  ? r._geoEl.toFixed(1) + '°'
                  : (r.geo === 'Yes' ? '?' : '—')) + '</td>' +
       '<td class="sn-add"></td>';
     var cell = tr.querySelector('.sn-add');
-    if (added) {
+    if (_snNoElements(r) && !added) {
+      tr.classList.add('sn-row-noel');
+      cell.textContent = '⊘';
+      cell.title = r.satst === 'future'
+        ? 'Not launched yet (SatNOGS: future, temporary NORAD id) - no orbital elements exist, so it cannot be tracked'
+        : 'Re-entered - no current orbital elements';
+    } else if (added) {
       cell.textContent = '✓';
       cell.classList.add('sn-added');
     } else {

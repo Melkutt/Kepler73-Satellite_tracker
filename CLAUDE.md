@@ -72,6 +72,13 @@ backend/
                         best-effort, never raises
   doppler.py            rx_freq / tx_freq from radial velocity (f_rx = f*(1 - v/c))
   rotctld.py            minimal rotctld TCP client (set_pos/get_pos/stop/probe)
+  autotrack.py          auto-track: normalize() config, compute_plan() = every pass of the ticked
+                        satellites for the next 24 h whose MAX elevation reaches the threshold
+                        (per entry, else default), _mark_conflicts() (overlap: higher max_el wins),
+                        AutoTracker.tick() state machine ("start"/"end" events; lead/tail seconds;
+                        a pass is never restarted once done), build_command()/run_command()
+                        (no shell: shlex split + safe placeholders + K73_* env). Pure logic;
+                        the side effects are in api/sockets.py _auto_start/_auto_end.
   rotor.py              pure rotator logic: desired_pointing() (elevation gate: park/track) and
                         beyond_deadband(); AOS pre-positioning + north-crossing/flip are TODO
   updatecheck.py        About-dialog "check for updates": latest GitHub release, else the
@@ -91,13 +98,19 @@ backend/
                         check_alarms() decides when a pass warning fires
 frontend/
   index.html            layout, dialogs, script includes
-  js/map.js             Leaflet map, satellite markers, tracks, footprints
-  js/polarmap.js        canvas polar/radar plot of a pass
+  js/map.js             Leaflet map, satellite markers, tracks, footprints (`footprintLatLngs()`: real
+                        great-circle outline as a polygon, 3 world copies, pole-enclosing case; NOT
+                        L.circle, whose Mercator ellipse is wrong at high latitudes)
+  js/polarmap.js        canvas polar/radar plot of a pass; rotor overlay (`drawRotor`: solid green strobe
+                        + elevation ring + beam wedge from the great-circle destination formula)
   js/sidebar.js         module + satellite list, selection
   js/simulator.js       pass simulator: scrub any pass +/- 7 days
   js/transponder.js     transponder panel / dialog (single-select, manual rows, out-of-band)
   js/hamlib.js          Radio/CAT dialog, status-bar RF/mode chip, CAT strip, band parsing
-  js/rotor.js           Rotator dialog, STOP/Park, status-bar chip
+  js/autotrack.js       Auto-track dialog (satellite table across all modules, upcoming-pass list,
+                        Test buttons), status-bar chip `#sb-auto`, `onAutoPass()` (page follows the
+                        module/selection switch the server already made)
+  js/rotor.js           Rotator dialog, STOP/Park, status-bar chip; feeds `setRotorView()` in polarmap.js
   js/basemap.js         built-in offline world map: Natural Earth land/lakes/borders drawn on a canvas
                         pane UNDER the tile layers (3 world copies for the date line); Map menu toggle
   js/offline.js         data-pack export/import, TLE-sources status in Settings, About dialog +
@@ -136,6 +149,10 @@ Satrec**. It is rebuilt by `_reload_records()` whenever the active module or its
 - `GET  /api/update-check` → `{current, latest, update_available, source, url, error, offline}`
 - `GET/POST /api/rig/config` (host, port, down_hz, up_hz, tx_enabled, deadband_hz, bands, enabled;
   mirrored to `rig_*` keys in app_config), `POST /api/rig/test` (ping + raw probe)
+- `GET/POST /api/autotrack` (config + `plan`, `current`, `problems`, `computing`; POST = partial update,
+  `entries` replaces the list; persisted as `auto_track` in app_config), `POST /api/autotrack/test-command`
+  (`{which: start|end}` runs the SAVED command with a dummy pass). Both POSTs go through `_local_only()`
+  (Host must be 127.0.0.1/localhost, Origin same-origin): the config holds a command line we execute
 - `GET/POST /api/rotor/config` (`rot_*` keys), `POST /api/rotor/test | park | stop` (park and stop
   also switch tracking off)
 - `GET  /api/tle/sources` (status of each line of the TLE-sources setting),
@@ -188,10 +205,10 @@ Satrec**. It is rebuilt by `_reload_records()` whenever the active module or its
 - `api/sockets.py:_auto_update_tle()` now keys `sat_records` by `norad_id` (was `sat["name"]`),
   matching `routes._reload_records()` / `_compute_positions()`.
 - The broadcast loop's catch-all now `traceback.print_exc()` instead of `pass`.
-- Version is single-sourced from `config.APP_VERSION` (now **0.4.0**): `main.py` banner,
+- Version is single-sourced from `config.APP_VERSION` (now **0.5.0**): `main.py` banner,
   `/api/info` and the status bar (`ui.js checkNetworkStatus`) read it; the `User-Agent` headers
-  say `Kepler73/0.4` and the static fallbacks in `index.html` (status bar, About) say v0.4 –
-  bump all of them on a release (`grep -rn "0\.4"`). `config.GITHUB_REPO` names the repo.
+  say `Kepler73/0.5` and the static fallbacks in `index.html` (status bar, About) say v0.5 –
+  bump all of them on a release (`grep -rn "0\.5"`). `config.GITHUB_REPO` names the repo.
 - `frontend/js/ui.js` gained the `quitApp()` function; a Quit control sits both in the
   Settings menu and as a button in the 30px status bar (bottom-right).
 - Removed the orphan duplicate `id="dlg-transponder"` block in `index.html` (the live one
@@ -240,6 +257,13 @@ Satrec**. It is rebuilt by `_reload_records()` whenever the active module or its
   footer. Each row has a ＋ that adds to the active module (TLE from `catalog_tle()` else
   resolved server-side); adding one row marks every same-NORAD row (`_snMarkAdded`) with a
   green ✓ and fades it.
+  **Satellite status vs transmitter status:** the table has two columns, `Satellite` (`satst`: in orbit /
+  not launched = SatNOGS `future` / re-entered) and `Tx` (`txst`). SatNOGS pre-registers transmitters for
+  satellites that are not launched yet under temporary 98xxx/99xxx NORAD ids (citation "Add temporary NORAD
+  ID", no TLE exists anywhere), so their transmitters read `active` while the satellite is `future`. Such rows
+  (and `re-entered` ones) are dimmed with a ⊘ instead of ＋, and "Active only" excludes them (it used to compare
+  against `'decayed'`, a value SatNOGS never uses). `satnogs.no_elements_reason()` gives the server's
+  "could not add" message the same explanation (`satnogs.sat_status()` reads satellites.json, no network).
 
 ## Added (2026-09-06 … 2026-10-30): CAT, rotator, v0.4
 
@@ -278,7 +302,35 @@ Satrec**. It is rebuilt by `_reload_records()` whenever the active module or its
     "SSTV-SSDV", and `/api/modules/SSTV%2FSSDV` 404s (Flask decodes `%2F`), so the sidebar showed
     an empty list. Fixed: `GET /api/modules` reports `canonical_name(active)`, and create/rename run
     names through `modules.clean_name()` (path-hostile characters → `-`, empty names rejected).
+  - **Shared CSS classes + document-wide selectors:** `satnogs.js` once did `document.querySelectorAll('.sn-table th')`;
+    the Auto-track dialog reused `.sn-table` and sits earlier in the page, so the header clicks of the SatNOGS table
+    silently stopped working (index offset). Always scope such selectors to the dialog id (`#dlg-satnogs ...`).
+    The SatNOGS headers now show a sort arrow (▲/▼) and every column except the add button sorts.
   - `style.css` and every script carry a `?v=N` buster – bump it, the in-app browser caches hard.
+
+- **Rotor overlay in the polar view** (2026-10-30): `rot_status.rot_az/rot_el` (rotctld read-back, every ~3 s;
+  `pos_ok` = a real read-back exists, `connected` also drops when a read-back fails, so a dead rotctld shows
+  up even when nothing is being commanded) drawn by `polarmap.js drawRotor()`. Display options live in
+  `rot_cfg` / `app_config`: `rot_show_polar`, `rot_show_beam`, `rot_beamwidth` (full -3 dB width, clamped
+  1-120°). Not part of the rotor control loop. Tested against the Hamlib dummy rotator only.
+
+- **Auto-track** (2026-10-30): `backend/autotrack.py` + `sockets._auto_tick` (first thing in the 1 Hz
+  loop, so a module switch applies to that tick's positions). The plan is rebuilt in a background
+  thread (dirty flag, `_reload_records()` invalidates it, otherwise every 5 min) and also while auto-track is
+  OFF, so the dialog can preview. At a start: switch active module (same code path as
+  `/api/modules/<n>/activate`), set `selected_satellite`, `apply_rot_cfg({enabled: True})` (runtime only,
+  not persisted), CAT `down_hz`/`enabled` with the old values stashed for the end, run `cmd_start`, emit
+  `auto_pass`; at an end: restore CAT, run `cmd_end`. The rotor is left in tracking mode (it parks itself
+  below `rot_min_el`). A pass that is already in progress when it is switched on is started at once.
+  Socket events: `auto_status` (chip, every 5 s) and `auto_pass` ({event, pass, notes}).
+  **Stale element sets are not planned** (`max_tle_age_days`, default 30, 0 = off; reported in `problems`):
+  found with the user's "Lek" module, whose SatNOGS 99xxx objects carried January-2023 TLEs - SGP4 3.8 years
+  from epoch gives 34 000 km "altitudes" and a fake 85 deg pass every 8 min, which (highest max_el wins)
+  starved every real satellite. The dialog shows the TLE age per satellite (epoch parsed from line 1).
+  A manual selection is only overridden at the START of the next auto pass (`selected_satellite` is
+  global; rotor/CAT follow whatever is selected).
+  Tested on the demo copy with the Hamlib dummy rotator/rig and two modules (module switch, CAT restore,
+  command env, no restart of an ended pass, refused cross-site posts) – never on real hardware.
 
 ## Screenshots (docs/img)
 

@@ -6,8 +6,9 @@ Kepler73 – REST API endpoints
 import os
 import threading
 import time as _time
+from urllib.parse import urlparse
 from flask import (Blueprint, jsonify, request, render_template,
-                   send_from_directory, make_response)
+                   send_from_directory, make_response, abort)
 from sgp4.api import Satrec
 
 import backend.modules as mod_mgr
@@ -16,6 +17,8 @@ import backend.tle_sources as tle_sources
 import backend.satcat as satcat
 import backend.datapack as datapack
 import backend.updatecheck as updatecheck
+from backend.autotrack import (auto as auto_tracker, DEFAULTS as AUTO_DEFAULTS,
+                               run_command as auto_run_command)
 from backend import netmode
 from backend.sgp4_engine import (propagate, forward_track, find_next_pass,
                                   get_pass_track, eci_to_azel, jd_to_dt,
@@ -35,6 +38,10 @@ state = {
 }
 netmode.set_offline(state["config"].get("offline_mode", False))
 
+auto_tracker.bind(lambda: (state["config"].get("lat", 59.33), state["config"].get("lon", 18.07),
+                           state["config"].get("alt", 20.0), state["config"].get("min_el", PASS_MIN_EL)))
+auto_tracker.set_config(state["config"].get("auto_track", {}))
+
 # Short-lived cache of /api/passes/<id> results (see get_next_pass).
 _pass_cache: dict = {}
 _PASS_TTL = 120   # seconds
@@ -43,6 +50,7 @@ _PASS_TTL = 120   # seconds
 def _reload_records():
     state["sat_records"].clear()
     _pass_cache.clear()          # element sets changed – drop cached pass predictions
+    auto_tracker.invalidate()    # ... and the auto-track plan
     mod = state["active_module"]
     if not mod:
         return
@@ -375,8 +383,8 @@ def add_satellite(name):
         else:
             resolved = tle_sources.resolve_tle(sat["norad_id"], state["config"])
             if not resolved:
-                return jsonify({"error": "No orbital elements found for "
-                                         f"NORAD {sat['norad_id']}"}), 404
+                from backend.satnogs import no_elements_reason
+                return jsonify({"error": no_elements_reason(sat["norad_id"])}), 404
             _, sat["tle_line1"], sat["tle_line2"] = resolved
 
     mod = mod_mgr.add_satellite(mod, sat)
@@ -1100,6 +1108,9 @@ _ROT_CFG_KEYS = {
     "rot_park_el":     "park_el",
     "rot_az_deadband": "az_deadband",
     "rot_el_deadband": "el_deadband",
+    "rot_show_polar":  "show_polar",
+    "rot_show_beam":   "show_beam",
+    "rot_beamwidth":   "beamwidth",
 }
 
 
@@ -1119,7 +1130,7 @@ def get_rotor_config():
 def set_rotor_config():
     """Update the live rotor config and mirror it to app_config.json. Body keys
     match rot_cfg (host, port, min_el, park_az, park_el, az_deadband,
-    el_deadband, enabled)."""
+    el_deadband, enabled, show_polar, show_beam, beamwidth)."""
     from api.sockets import apply_rot_cfg, rot_cfg
     apply_rot_cfg(request.json or {})
     _persist_rot_cfg(rot_cfg)
@@ -1168,6 +1179,62 @@ def rotor_stop():
     err = c.last_error
     c.close()
     return jsonify({"ok": bool(ok), "error": err})
+
+
+# ── Auto-track ────────────────────────────────────────────────
+
+def _local_only():
+    """The auto-track settings contain a command line that Kepler73 will RUN, so only a page
+    served from this very host may change them (DNS-rebinding / cross-site guard). Flask
+    already refuses non-JSON bodies, which stops plain cross-site form posts."""
+    ok = ("127.0.0.1", "localhost", "[::1]")
+    host = (request.host or "").lower()
+    if host.rsplit(":", 1)[0] not in ok:
+        abort(403)
+    origin = request.headers.get("Origin")
+    if origin and urlparse(origin).netloc.lower() != host:
+        abort(403)
+
+
+@bp.route("/api/autotrack", methods=["GET"])
+def get_autotrack():
+    """{config, plan, current, problems, computing, now_jd}. The plan is rebuilt in the
+    background, so right after a change ``computing`` is true until it is ready."""
+    return jsonify(auto_tracker.snapshot())
+
+
+@bp.route("/api/autotrack", methods=["POST"])
+def set_autotrack():
+    """Partial update of the auto-track config (keys as in autotrack.DEFAULTS; ``entries``
+    replaces the whole list). Persisted under ``auto_track`` in app_config.json."""
+    _local_only()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON object expected"}), 400
+    merged = dict(auto_tracker.cfg)
+    merged.update({k: v for k, v in data.items() if k in AUTO_DEFAULTS})
+    auto_tracker.set_config(merged)
+    state["config"]["auto_track"] = auto_tracker.cfg
+    mod_mgr.save_config(state["config"])
+    return jsonify(auto_tracker.snapshot())
+
+
+@bp.route("/api/autotrack/test-command", methods=["POST"])
+def test_autotrack_command():
+    """Run the SAVED start / end command once with a dummy pass (body {which: start|end})."""
+    _local_only()
+    which = (request.get_json(silent=True) or {}).get("which")
+    if which not in ("start", "end"):
+        return jsonify({"error": "which must be 'start' or 'end'"}), 400
+    template = auto_tracker.cfg["cmd_start" if which == "start" else "cmd_end"]
+    if not template:
+        return jsonify({"ok": False, "error": "No command saved for this event"}), 400
+    jd = now_jd()
+    fake = {"name": "TEST SAT", "norad_id": "00000", "module": "test", "max_el": 45.0,
+            "aos_jd": jd, "los_jd": jd + 600 / 86400, "duration": 600,
+            "down_mhz": 137.9, "aos_az": 0.0, "los_az": 180.0}
+    err = auto_run_command(template, which, fake)
+    return jsonify({"ok": not err, "error": err})
 
 
 # ── Settings ──────────────────────────────────────────────────
@@ -1302,7 +1369,7 @@ def _fetch_tile(layer, z, x, y):
         else:
             url = f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"
         req = urllib.request.Request(
-            url, headers={"User-Agent": "Kepler73/0.4 (amateur radio)"})
+            url, headers={"User-Agent": "Kepler73/0.5 (amateur radio)"})
         with urllib.request.urlopen(req, timeout=6) as r:
             return r.read()
     except Exception:

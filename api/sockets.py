@@ -8,6 +8,7 @@ from flask_socketio import SocketIO
 
 from backend.config import TLE_UPDATE_INTERVAL
 from backend import doppler, rotor
+from backend.autotrack import auto, run_command as auto_run_command
 from backend.hamlib import RigctldClient
 from backend.rotctld import RotctldClient
 
@@ -164,6 +165,10 @@ rot_cfg = {
     "park_el":     0.0,
     "az_deadband": 2.0,     # don't re-command for a smaller move
     "el_deadband": 2.0,
+    # polar-view display only (the rotor worker never reads these)
+    "show_polar":  True,    # draw the rotor pointing in the polar view
+    "show_beam":   True,    # ... with the antenna beam as a wedge
+    "beamwidth":   20.0,    # full -3 dB beamwidth, degrees
 }
 rot_status = {
     "enabled":   False,
@@ -175,6 +180,7 @@ rot_status = {
     "cmd_el":    0.0,
     "rot_az":    0.0,       # read back from the rotator
     "rot_el":    0.0,
+    "pos_ok":    False,     # rot_az / rot_el hold a real readback
 }
 _rot_target = {"pos": None}   # (az, el) the rotor should point at, or None
 _rot_lock   = threading.Lock()
@@ -195,6 +201,14 @@ def apply_rot_cfg(new: dict):
                 rot_cfg[k] = float(new[k])
             except (TypeError, ValueError):
                 pass
+    if "beamwidth" in new:
+        try:
+            rot_cfg["beamwidth"] = min(120.0, max(1.0, float(new["beamwidth"])))
+        except (TypeError, ValueError):
+            pass
+    for k in ("show_polar", "show_beam"):
+        if k in new:
+            rot_cfg[k] = bool(new[k])
     if "enabled" in new:
         rot_cfg["enabled"] = bool(new["enabled"])
     _rot_wake.set()
@@ -237,7 +251,7 @@ def _rotor_worker():
                 client.close()
                 client = None
             last_cmd = None
-            rot_status.update(enabled=False, connected=False, mode="idle")
+            rot_status.update(enabled=False, connected=False, mode="idle", pos_ok=False)
             continue
         rot_status["enabled"] = True
 
@@ -250,12 +264,10 @@ def _rotor_worker():
 
         with _rot_lock:
             tgt = _rot_target["pos"]
-        if tgt is None:
-            continue
-
-        if rotor.beyond_deadband(tgt, last_cmd,
-                                 float(rot_cfg["az_deadband"]),
-                                 float(rot_cfg["el_deadband"])):
+        # (no target = nothing to command, but keep reading the rotor back below)
+        if tgt is not None and rotor.beyond_deadband(tgt, last_cmd,
+                                                     float(rot_cfg["az_deadband"]),
+                                                     float(rot_cfg["el_deadband"])):
             if client.set_pos(tgt[0], tgt[1]):
                 last_cmd = tgt
                 rot_status.update(connected=True, error="",
@@ -267,7 +279,75 @@ def _rotor_worker():
         if tick % 3 == 0:            # rotors move slowly – read back ~every 3 s
             pos = client.get_pos()
             if pos:
-                rot_status.update(rot_az=round(pos[0], 1), rot_el=round(pos[1], 1))
+                rot_status.update(rot_az=round(pos[0], 1), rot_el=round(pos[1], 1),
+                                  pos_ok=True, connected=True, error="")
+            else:                    # a dead rotctld must show up even when nothing is being commanded
+                rot_status.update(connected=False, error=client.last_error)
+
+
+# ── Auto-track ─────────────────────────────────────────────────
+# The plan / state machine is backend/autotrack.py; this is what a pass start / end
+# does to the live app. It runs in the 1 Hz loop thread (same one that computes positions).
+
+_auto_saved = {}     # CAT settings to put back when the pass is over
+
+
+def _auto_start(p: dict, socketio):
+    from api import routes
+    import backend.modules as mod_mgr
+    cfg, notes = auto.cfg, []
+
+    # The satellite may live in a module that is not the active one: switch to it.
+    active = (routes.state["active_module"] or {}).get("name") or ""
+    if p["module"] and mod_mgr.canonical_name(active) != mod_mgr.canonical_name(p["module"]):
+        try:
+            routes.state["active_module"] = mod_mgr.load_module(p["module"])
+            routes.state["config"]["active_module"] = p["module"]
+            mod_mgr.save_config(routes.state["config"])
+            routes._reload_records()
+        except Exception as e:
+            notes.append("could not switch to module %s: %s" % (p["module"], e))
+
+    selected_satellite["name"] = p["name"]
+    _auto_saved.clear()
+    if cfg["use_rotor"]:
+        apply_rot_cfg({"enabled": True})      # runtime only (not written to app_config)
+    if cfg["use_cat"] and p.get("down_mhz"):
+        _auto_saved["rig"] = {"enabled": rig_cfg["enabled"], "down_hz": rig_cfg["down_hz"]}
+        apply_rig_cfg({"down_hz": p["down_mhz"] * 1e6, "enabled": True})
+
+    err = auto_run_command(cfg["cmd_start"], "start", p)
+    if err:
+        notes.append(err)
+        print("[Kepler73] auto-track: " + err)
+    print("[Kepler73] auto-track START %s (max %.0f deg)" % (p["name"], p["max_el"]))
+    socketio.emit("auto_pass", {"event": "start", "pass": p, "notes": notes})
+
+
+def _auto_end(p: dict, socketio):
+    notes = []
+    saved = _auto_saved.pop("rig", None)
+    if saved:
+        apply_rig_cfg(saved)                  # CAT back to what it was before the pass
+    err = auto_run_command(auto.cfg["cmd_end"], "end", p)
+    if err:
+        notes.append(err)
+        print("[Kepler73] auto-track: " + err)
+    print("[Kepler73] auto-track END %s" % p["name"])
+    socketio.emit("auto_pass", {"event": "end", "pass": p, "notes": notes})
+
+
+def _auto_tick(socketio, tick: int):
+    from backend.sgp4_engine import now_jd
+    auto.maybe_recompute()
+    events = auto.tick(now_jd())
+    for ev, p in events:
+        try:
+            (_auto_start if ev == "start" else _auto_end)(p, socketio)
+        except Exception:
+            traceback.print_exc()
+    if events or tick % 5 == 0:
+        socketio.emit("auto_status", auto.chip())
 
 
 def _auto_update_tle():
@@ -317,6 +397,7 @@ def start_position_broadcast(socketio: SocketIO):
         while True:
             try:
                 from api.routes import state, _compute_positions
+                _auto_tick(socketio, tick)      # may switch module / selection first
                 positions = _compute_positions(selected_satellite["name"])
                 socketio.emit("satellite_positions", positions)
 
@@ -410,6 +491,9 @@ def start_position_broadcast(socketio: SocketIO):
             "az_deadband": _cr.get("rot_az_deadband", rot_cfg["az_deadband"]),
             "el_deadband": _cr.get("rot_el_deadband", rot_cfg["el_deadband"]),
             "enabled":     _cr.get("rot_enabled", False),
+            "show_polar":  _cr.get("rot_show_polar", True),
+            "show_beam":   _cr.get("rot_show_beam", True),
+            "beamwidth":   _cr.get("rot_beamwidth", rot_cfg["beamwidth"]),
         })
     except Exception:
         traceback.print_exc()

@@ -126,6 +126,49 @@ function makeSatIcon(color, selected) {
   });
 }
 
+// ── Footprint outline ────────────────────────────────────────
+// L.circle draws an ELLIPSE in the Mercator projection, which at high latitudes is neither
+// the right shape nor in the right place: an observer just beyond the horizon looked
+// "covered". This builds the real great-circle outline (radius_km along the surface) instead.
+
+var FOOTPRINT_R_KM = 6378.137;   // same Earth radius as sgp4_engine.footprint_km()
+var MERC_MAX_LAT   = 85;         // keep the path finite where Mercator blows up
+
+function footprintLatLngs(lat, lon, radiusKm) {
+  if (!(radiusKm > 0)) return [];
+  var D = Math.PI / 180;
+  var ang = radiusKm / FOOTPRINT_R_KM;                 // angular radius, radians
+  var phi0 = lat * D, ring = [], i;
+  var clampLat = function(v) { return Math.max(-MERC_MAX_LAT, Math.min(MERC_MAX_LAT, v)); };
+
+  if (Math.abs(lat) + ang / D >= 90) {
+    // The footprint contains a pole: the outline is a boundary latitude per longitude,
+    // closed along the top (or bottom) edge of the map. Mirrored so the pole is "north".
+    var sgn = lat >= 0 ? 1 : -1, p = Math.abs(phi0);
+    for (var dl = -180; dl <= 180; dl += 3) {
+      var a = Math.sin(p), b = Math.cos(p) * Math.cos(dl * D);
+      var rr = Math.sqrt(a * a + b * b);
+      var phi = Math.asin(Math.max(-1, Math.min(1, Math.cos(ang) / rr))) - Math.atan2(b, a);
+      ring.push([clampLat(sgn * phi / D), lon + dl]);
+    }
+    ring.push([sgn * MERC_MAX_LAT, lon + 180]);
+    ring.push([sgn * MERC_MAX_LAT, lon - 180]);
+  } else {
+    for (i = 0; i < 120; i++) {
+      var brg = 2 * Math.PI * i / 120;
+      var s2 = Math.sin(phi0) * Math.cos(ang) + Math.cos(phi0) * Math.sin(ang) * Math.cos(brg);
+      var lat2 = Math.asin(Math.max(-1, Math.min(1, s2)));
+      var dlon = Math.atan2(Math.sin(brg) * Math.sin(ang) * Math.cos(phi0),
+                            Math.cos(ang) - Math.sin(phi0) * s2);
+      ring.push([clampLat(lat2 / D), lon + dlon / D]);
+    }
+  }
+  // Three world copies so a footprint over the date line shows on both sides.
+  return [ring,
+          ring.map(function(q) { return [q[0], q[1] + 360]; }),
+          ring.map(function(q) { return [q[0], q[1] - 360]; })];
+}
+
 // ── Update satellites on map ─────────────────────────────────
 
 function updateMapSatellites(data) {
@@ -164,8 +207,8 @@ function updateMapSatellites(data) {
 
       marker.on('click', function() { selectSat(name); });
 
-      var footprint = L.circle(latlng, {
-        radius: (s.footprint_km || 0) * 1000,
+      var footprint = L.polygon(footprintLatLngs(s.lat, s.lon, s.footprint_km), {
+        interactive: false,
         color: color,
         weight: 1,
         opacity: selected ? 0.5 : 0.2,
@@ -180,14 +223,11 @@ function updateMapSatellites(data) {
       satMarkers[name].marker.setLatLng(latlng);
       satMarkers[name].marker.setIcon(makeSatIcon(color, selected));
       satMarkers[name].marker.setZIndexOffset(selected ? 2000 : 1000);
-      satMarkers[name].footprint.setLatLng(latlng);
       satMarkers[name].footprint.setStyle({
         opacity:     selected ? 0.5  : 0.2,
         fillOpacity: selected ? 0.12 : 0.03
       });
-      if (s.footprint_km) {
-        satMarkers[name].footprint.setRadius(s.footprint_km * 1000);
-      }
+      satMarkers[name].footprint.setLatLngs(footprintLatLngs(s.lat, s.lon, s.footprint_km));
     }
 
     // Redraw ground track - remove old segments, draw new ones

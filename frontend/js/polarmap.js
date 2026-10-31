@@ -1,5 +1,7 @@
-// Kepler73 - polarmap.js v2
-// Polar view: strobe points toward satellite, dot lights up when above horizon
+// Kepler73 - polarmap.js v3
+// Polar view: strobe points toward satellite, dot lights up when above horizon.
+// With the rotator on, a solid green strobe + ring shows where it actually points,
+// and an optional wedge shows the antenna beam.
 
 var _polarPass      = null;
 var _polarColor     = '#00e676';
@@ -7,6 +9,21 @@ var _polarSatName   = '';
 var _polarAnimFrame = null;
 var _polarCurrentAz = null;
 var _polarCurrentEl = null;
+
+// Rotator overlay state, fed by rotor.js (config) and the rotor_status event.
+var _rotView = {
+  show: true, beam: true, beamwidth: 20,         // from the rotor dialog
+  enabled: false, connected: false, posOk: false, az: 0, el: 0
+};
+var ROT_COLOR = '#00e676';
+
+function setRotorView(part) {
+  Object.keys(part).forEach(function(k) { if (part[k] !== undefined) _rotView[k] = part[k]; });
+  if (document.getElementById('polar-canvas')) {
+    if (_polarAnimFrame) cancelAnimationFrame(_polarAnimFrame);
+    _polarAnimFrame = requestAnimationFrame(drawPolar);
+  }
+}
 
 // ── Public API ───────────────────────────────────────────────
 
@@ -29,6 +46,7 @@ function clearPolarMap() {
   var cx = canvas.width / 2, cy = canvas.height / 2, R = cx - 16;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   drawGrid(ctx, cx, cy, R);
+  drawRotor(ctx, cx, cy, R);
   document.getElementById('polar-hint').textContent = 'Select a satellite';
 }
 
@@ -51,6 +69,7 @@ function drawPolar() {
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   drawGrid(ctx, cx, cy, R);
+  drawRotor(ctx, cx, cy, R);        // under the satellite strobe
 
   if (_polarCurrentAz === null) {
     document.getElementById('polar-hint').textContent = 'Select a satellite';
@@ -114,6 +133,90 @@ function drawPolar() {
     hint += '  \xB7  AOS ' + _polarPass.aos_dt.slice(11, 16) + ' UTC';
   }
   document.getElementById('polar-hint').textContent = hint;
+}
+
+// ── Rotator overlay ──────────────────────────────────────────
+
+// Outline of the beam cone (half-angle `half` degrees around az0/el0) projected like the
+// grid: azimuth = angle, radius = 90 - elevation. Points come from the great-circle
+// "destination point" formula with elevation as latitude, so the shape is exact
+// (not a circle in this projection) and wraps correctly past the zenith.
+function _beamOutline(cx, cy, R, az0, el0, half) {
+  var D = Math.PI / 180;
+  var d = half * D, lat1 = Math.min(el0, 89.9) * D, lon1 = az0 * D, pts = [];
+  for (var i = 0; i < 72; i++) {
+    var b = 2 * Math.PI * i / 72;
+    var s2 = Math.sin(lat1) * Math.cos(d) + Math.cos(lat1) * Math.sin(d) * Math.cos(b);
+    var lat2 = Math.asin(Math.max(-1, Math.min(1, s2)));
+    var lon2 = lon1 + Math.atan2(Math.sin(b) * Math.sin(d) * Math.cos(lat1),
+                                 Math.cos(d) - Math.sin(lat1) * s2);
+    var r = R * (1 - (lat2 / D) / 90);
+    pts.push([cx + Math.sin(lon2) * r, cy - Math.cos(lon2) * r]);
+  }
+  return pts;
+}
+
+function drawRotor(ctx, cx, cy, R) {
+  var v = _rotView;
+  if (!v.show || !v.enabled) return;
+
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+
+  if (!v.posOk) {                                   // nothing read back from the rotor yet
+    ctx.fillStyle = v.connected ? '#5a6a5a' : '#ff9800';
+    ctx.fillText(v.connected ? 'ROT: ...' : 'ROT: no link', 4, 4);
+    ctx.textBaseline = 'alphabetic';
+    return;
+  }
+
+  var live = v.connected;                           // stale = grey and dashed
+  var rad  = v.az * Math.PI / 180;
+  var ex   = cx + Math.sin(rad) * R, ey = cy - Math.cos(rad) * R;
+  var col  = live ? ROT_COLOR : '#5a6a5a';
+
+  // Beam wedge (clipped to the sky disc)
+  if (v.beam && v.beamwidth > 0) {
+    var pts = _beamOutline(cx, cy, R, v.az, Math.max(v.el, 0), v.beamwidth / 2);
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.beginPath();
+    pts.forEach(function(p, i) { if (i) ctx.lineTo(p[0], p[1]); else ctx.moveTo(p[0], p[1]); });
+    ctx.closePath();
+    ctx.fillStyle   = live ? 'rgba(0,230,118,0.18)' : 'rgba(90,106,90,0.12)';
+    ctx.fill();
+    ctx.strokeStyle = live ? 'rgba(0,230,118,0.7)' : 'rgba(90,106,90,0.5)';
+    ctx.lineWidth   = 1;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Pointing strobe: solid (the satellite strobe is dashed)
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(ex, ey);
+  ctx.strokeStyle = col;
+  ctx.lineWidth   = 2;
+  if (live) { ctx.shadowColor = ROT_COLOR; ctx.shadowBlur = 6; } else { ctx.setLineDash([2, 4]); }
+  ctx.stroke();
+  ctx.restore();
+
+  // Ring at the antenna elevation (the satellite is a filled dot)
+  var rr = R * (1 - Math.max(0, Math.min(90, v.el)) / 90);
+  ctx.beginPath();
+  ctx.arc(cx + Math.sin(rad) * rr, cy - Math.cos(rad) * rr, 6, 0, Math.PI * 2);
+  ctx.strokeStyle = col;
+  ctx.lineWidth   = 2;
+  ctx.stroke();
+
+  ctx.fillStyle = col;
+  ctx.fillText('ROT AZ: ' + v.az.toFixed(1) + '\xB0', 4, 4);
+  ctx.fillText('ROT EL: ' + v.el.toFixed(1) + '\xB0', 4, 16);
+  ctx.textBaseline = 'alphabetic';
 }
 
 // ── Grid ─────────────────────────────────────────────────────

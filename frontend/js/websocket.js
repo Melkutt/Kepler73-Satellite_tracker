@@ -37,6 +37,14 @@ socket.on('rotor_status', function(data) {
   if (typeof updateRotorStatus === 'function') updateRotorStatus(data);
 });
 
+socket.on('auto_status', function(data) {
+  if (typeof updateAutoStatus === 'function') updateAutoStatus(data);
+});
+
+socket.on('auto_pass', function(data) {
+  if (typeof onAutoPass === 'function') onAutoPass(data);
+});
+
 // ── Selected satellite - tells server to compute 3-orbit track ──
 
 function notifySelected(name) {

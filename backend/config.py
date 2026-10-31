@@ -27,7 +27,7 @@ for d in [MODULES_DIR, TLE_DIR, TILE_DIR]:
 
 # ── App info ──────────────────────────────────────────────────
 APP_NAME    = "Kepler73"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 AUTHOR      = "SA1CKW"
 GITHUB_REPO = "Melkutt/Kepler73-Satellite_tracker"
 

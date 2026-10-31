@@ -1374,3 +1374,42 @@ body.rp-pinned #map-container { margin-right: 220px; }
 .about-update { display: flex; align-items: center; gap: 10px; margin: 8px 0 4px; flex-wrap: wrap; }
 .about-update .hint { margin: 0; }
 .about-update a { color: var(--accent2); }
+
+/* ── Auto-track dialog + status chip ─────────────────────── */
+#sb-auto { font-size: 10px; font-variant-numeric: tabular-nums; }
+.auto-grid {
+  display: grid;
+  grid-template-columns: 230px 1fr;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.auto-grid > label { color: var(--fg-dim); font-size: 11px; }
+.auto-grid .offline-opt { color: var(--fg); }
+.auto-cmd { display: flex; gap: 6px; }
+.auto-cmd input { flex: 1; margin-bottom: 0; }
+.modal .auto-table input.auto-num { width: 96px; margin: 0; padding: 2px 6px; }
+.auto-table input[type=checkbox] { margin: 0; }
+#dlg-auto .sn-toolbar select {
+  background: var(--entry); color: var(--fg); border: 1px solid var(--sep);
+  border-radius: var(--radius); font-family: var(--font); font-size: 11px; padding: 5px 6px;
+}
+#dlg-auto .sn-toolbar input[type=text] { margin-bottom: 0; }
+.auto-table tbody tr:not(.auto-on) td { color: var(--fg-dim); }
+.auto-table tbody tr.auto-on td { color: var(--fg); }
+.auto-ok   { color: var(--accent); }
+.auto-skip { color: var(--warn); }
+.auto-now  { color: var(--accent); font-weight: bold; }
+tr.auto-skipped td { opacity: 0.65; }
+.auto-stale { color: var(--warn) !important; }
+.auto-table tr.auto-old td { opacity: 0.55; }
+#auto-plan-note { max-height: 84px; overflow-y: auto; }
+.sn-table tr.sn-row-noel td { opacity: 0.55; }
+.sn-table td.sn-st-future { color: var(--warn); }
+.sn-table td.sn-st-reentered { color: var(--fg-dim); text-decoration: line-through; }
+.sn-table td.sn-st-inorbit { color: var(--accent); }
+.sn-table tr.sn-row-noel td.sn-add { cursor: help; }
+.sn-table th.sn-sortable { cursor: pointer; user-select: none; }
+.sn-table th.sn-sortable:hover { color: var(--fg); }
+.sn-table th.sort-asc::after  { content: ' ▲'; color: var(--accent); }
+.sn-table th.sort-desc::after { content: ' ▼'; color: var(--accent); }

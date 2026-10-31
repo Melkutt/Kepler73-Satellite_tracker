@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Kepler73</title>
 <link rel="stylesheet" href="/vendor/leaflet/leaflet.css"/>
-<link rel="stylesheet" href="/css/style.css?v=8"/>
+<link rel="stylesheet" href="/css/style.css?v=13"/>
 </head>
 <body>
 
@@ -29,6 +29,7 @@
     <div class="dropdown" id="menu-satellites">
       <a onclick="showSearchDialog()">🔍 Search & add</a>
       <a onclick="showSatnogsDialog()">🔎 SatNOGS lookup</a>
+      <a onclick="showAutoDialog()">⏺ Auto-track passes…</a>
       <a onclick="refreshAllTLE()">🔄 Update all TLEs</a>
       <hr>
       <a onclick="exportTLE(false)">⬇ Export TLEs (this module)</a>
@@ -157,8 +158,9 @@
   <span id="sb-notice" style="display:none"></span>
   <span id="sb-rf" style="display:none" title="Rig frequency / mode / passband"></span>
   <span id="sb-rot" style="display:none" title="Rotator tracking"></span>
+  <span id="sb-auto" style="display:none" title="Auto-track: current / next pass (Satellites ▸ Auto-track passes)"></span>
   <span id="sb-rig" style="display:none" title="CAT Doppler tuning active"></span>
-  <span style="margin-left:auto" id="sb-version">Kepler73 v0.4 – SA1CKW</span>
+  <span style="margin-left:auto" id="sb-version">Kepler73 v0.5 – SA1CKW</span>
   <button id="sb-quit" onclick="quitApp()" title="Shut down Kepler73">⏻ Quit</button>
 </div>
 
@@ -324,6 +326,12 @@
         <input type="number" id="rot-azdb" value="2" step="0.5" min="0">
         <input type="number" id="rot-eldb" value="2" step="0.5" min="0">
       </span>
+      <label>Rotor in polar view</label>
+      <input type="checkbox" id="rot-showpolar" checked style="width:auto;margin-top:6px;justify-self:start">
+      <label>Show antenna beam</label>
+      <input type="checkbox" id="rot-showbeam" checked style="width:auto;margin-top:6px;justify-self:start">
+      <label>Beamwidth −3 dB (°)</label>
+      <input type="number" id="rot-beamw" value="20" step="1" min="1" max="120">
     </div>
 
     <div class="radio-actions">
@@ -345,6 +353,98 @@
     <div class="modal-btns">
       <button class="btn-primary" onclick="rotSave()">💾 Save</button>
       <button class="btn-cancel" onclick="closeDialog('dlg-rotor')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Auto-track passes -->
+<div class="modal-bg" id="dlg-auto">
+  <div class="modal modal-xwide">
+    <h3>⏺ Auto-track passes</h3>
+    <p class="hint">Tick the satellites you want from any of your modules. For every pass whose
+      <b>maximum elevation</b> reaches the threshold, Kepler73 selects the satellite (switching to
+      its module if needed), starts the rotor and CAT Doppler, and runs your commands – for
+      example a script that starts and stops an SDR recording. If two passes overlap, the one
+      with the higher elevation wins. Weather satellites: try 20–25°, SSTV/SSDV: 10–15°.</p>
+    <p class="about-warn">⚠ Rotor and CAT are not tested on real hardware – try the Hamlib dummy
+      rotator / rig first. After a pass the rotor stays in tracking mode and parks itself below
+      its "Track above El"; CAT goes back to what it was.</p>
+
+    <div class="auto-grid">
+      <label>Auto-track</label>
+      <label class="offline-opt"><input type="checkbox" id="auto-enabled">
+        <span>On – start passes by themselves</span></label>
+      <label>Default threshold (°)</label>
+      <input type="number" id="auto-minel" value="20" min="0" max="90" step="1"
+             oninput="_atRenderSats()" style="width:90px">
+      <label>Start before AOS / stay after LOS (s)</label>
+      <span class="rot-pair" style="max-width:200px">
+        <input type="number" id="auto-lead" value="30" min="0" max="3600" step="5">
+        <input type="number" id="auto-tail" value="30" min="0" max="3600" step="5">
+      </span>
+      <label>Steer the rotor</label>
+      <label class="offline-opt"><input type="checkbox" id="auto-rotor" checked>
+        <span>Switch rotor tracking on for the pass</span></label>
+      <label>Tune CAT Doppler</label>
+      <label class="offline-opt"><input type="checkbox" id="auto-cat" checked>
+        <span>Only for satellites with a downlink (MHz) below</span></label>
+      <label>Ignore element sets older than (days)</label>
+      <input type="number" id="auto-maxage" value="30" min="0" max="3650" step="1"
+             oninput="_atRenderSats()" style="width:90px"
+             title="Predictions from an old element set (TLE) are fiction - typical for objects that have decayed. 0 = never ignore.">
+      <label>Command at pass start</label>
+      <span class="auto-cmd">
+        <input type="text" id="auto-cmd-start" autocomplete="off" spellcheck="false"
+               placeholder='e.g. C:\sdr\start_rec.bat {sat} {max_el}'>
+        <button class="btn-cancel" type="button" onclick="atTestCmd('start')" title="Save, then run once with a dummy pass">Test</button>
+      </span>
+      <label>Command at pass end</label>
+      <span class="auto-cmd">
+        <input type="text" id="auto-cmd-end" autocomplete="off" spellcheck="false"
+               placeholder='e.g. C:\sdr\stop_rec.bat {sat}'>
+        <button class="btn-cancel" type="button" onclick="atTestCmd('end')" title="Save, then run once with a dummy pass">Test</button>
+      </span>
+    </div>
+    <p class="hint">The command is started directly (no shell, not waited for). Placeholders:
+      <code>{sat}</code> <code>{norad}</code> <code>{module}</code> <code>{max_el}</code>
+      <code>{aos}</code> <code>{los}</code> (UTC, 20261031T013338Z) <code>{duration}</code>
+      <code>{down_mhz}</code> <code>{event}</code>. The same values are also set as environment
+      variables <code>K73_SAT</code>, <code>K73_NORAD</code>, <code>K73_MAX_EL</code>,
+      <code>K73_AOS_UTC</code>, <code>K73_LOS_UTC</code>, <code>K73_DOWN_MHZ</code>,
+      <code>K73_EVENT</code> …</p>
+
+    <div class="sn-toolbar">
+      <input type="text" id="auto-filter" placeholder="Filter by name or NORAD…" oninput="_atRenderSats()" style="flex:1">
+      <select id="auto-modfilter" onchange="_atRenderSats()"></select>
+      <button class="btn-cancel" type="button" onclick="atSelectShown(true)">Tick shown</button>
+      <button class="btn-cancel" type="button" onclick="atSelectShown(false)">Clear shown</button>
+    </div>
+    <div class="sn-table-wrap" style="max-height:26vh">
+      <table class="sn-table auto-table">
+        <thead><tr><th></th><th>Satellite</th><th>NORAD</th><th>Module</th>
+          <th title="Age of the element set (TLE). Red = older than the limit above: that satellite is ignored, its predictions would be wrong.">Elements</th>
+          <th title="This satellite's own threshold (max elevation of the pass). Empty = the default above.">Min max-el (°)</th>
+          <th title="MHz. CAT tunes this frequency with Doppler during the pass. Empty = CAT is left alone.">Downlink (MHz)</th></tr></thead>
+        <tbody id="auto-tbody"></tbody>
+      </table>
+    </div>
+    <div id="auto-count" class="hint"></div>
+
+    <div class="panel-header" style="margin-top:6px"><span>UPCOMING PASSES (NEXT 24 H, UTC)</span></div>
+    <div class="sn-table-wrap" style="max-height:22vh">
+      <table class="sn-table">
+        <thead><tr><th>Start</th><th>Satellite</th><th>Max el</th><th>Length</th><th>Az in → out</th><th>Plan</th></tr></thead>
+        <tbody id="auto-plan"></tbody>
+      </table>
+    </div>
+    <div id="auto-plan-note" class="hint"></div>
+
+    <div class="modal-btns" style="justify-content:space-between">
+      <span id="auto-msg" class="hint" style="margin:0"></span>
+      <span style="display:flex;gap:8px">
+        <button class="btn-primary" onclick="atSave()">💾 Save</button>
+        <button class="btn-cancel" onclick="closeDialog('dlg-auto')">Close</button>
+      </span>
     </div>
   </div>
 </div>
@@ -441,7 +541,7 @@
 <div class="modal-bg" id="dlg-about">
   <div class="modal">
     <h3>🛰 About Kepler73</h3>
-    <p class="hint">Kepler73 <span id="about-version">v0.4</span> — a local satellite tracker for
+    <p class="hint">Kepler73 <span id="about-version">v0.5</span> — a local satellite tracker for
       amateur-radio use, by <b>SA1CKW</b>. Everything runs and is cached on your machine;
       nothing is sent to any cloud.</p>
     <p class="about-warn">⚠ <b>Radio / CAT and Rotator control are new and have not been
@@ -481,6 +581,12 @@
           from Celestrak or the SatNOGS catalogue; or load a local TLE file.</li>
         <li><b>Pass simulator</b> (bottom-left) scrubs any pass up to a year
           back.</li>
+        <li><b>Auto-track</b> (Satellites menu): tick satellites from any module and a minimum
+          <i>maximum elevation</i> (e.g. 20° for weather satellites, 10° for SSTV/SSDV). For
+          every pass that reaches it, Kepler73 selects the satellite at AOS, switches module if
+          needed, starts the rotor / CAT Doppler and runs your own start and end commands –
+          e.g. a script that starts and stops an SDR recording. Overlapping passes: the higher
+          one wins. Off by default.</li>
         <li><b>Radio / CAT</b> sends the Doppler-corrected frequency to a
           Hamlib <code>rigctld</code>; <b>Rotator</b> points a <code>rotctld</code> at the
           selected satellite (Settings menu). Both are untested on real hardware.</li>
@@ -629,7 +735,7 @@
       <table class="sn-table">
         <thead><tr>
           <th>NORAD</th><th>Name</th><th>Dir</th><th>MHz</th><th>Mode</th>
-          <th>Service</th><th>Type</th><th>Status</th><th>QTH el</th><th></th>
+          <th>Service</th><th>Type</th><th title="Satellite status in SatNOGS: in orbit / not launched yet / re-entered">Satellite</th><th title="Transmitter status">Tx</th><th>QTH el</th><th></th>
         </tr></thead>
         <tbody id="sn-tbody"></tbody>
       </table>
@@ -692,17 +798,18 @@
 <!-- Scripts -->
 <script src="/vendor/leaflet/leaflet.js"></script>
 <script src="/vendor/socket.io/socket.io.min.js"></script>
-<script src="/js/map.js?v=10"></script>
+<script src="/js/map.js?v=11"></script>
 <script src="/js/basemap.js?v=1"></script>
 <script src="/js/sidebar.js?v=13"></script>
-<script src="/js/websocket.js?v=9"></script>
+<script src="/js/websocket.js?v=10"></script>
 <script src="/js/ui.js?v=18"></script>
-<script src="/js/polarmap.js?v=7"></script>
+<script src="/js/polarmap.js?v=8"></script>
 <script src="/js/transponder.js?v=11"></script>
 <script src="/js/simulator.js?v=3"></script>
-<script src="/js/satnogs.js?v=5"></script>
+<script src="/js/satnogs.js?v=7"></script>
 <script src="/js/hamlib.js?v=5"></script>
-<script src="/js/rotor.js?v=1"></script>
+<script src="/js/rotor.js?v=2"></script>
+<script src="/js/autotrack.js?v=3"></script>
 <script src="/js/userdata.js?v=1"></script>
 <script src="/js/offline.js?v=3"></script>
 

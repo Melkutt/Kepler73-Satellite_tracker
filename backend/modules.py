@@ -154,6 +154,9 @@ def load_config() -> dict:
         "rot_park_el": 0.0,
         "rot_az_deadband": 2.0,
         "rot_el_deadband": 2.0,
+        "rot_show_polar": True,   # draw the rotor pointing in the polar view
+        "rot_show_beam": True,    # ... with the antenna beam as a wedge
+        "rot_beamwidth": 20.0,    # full -3 dB beamwidth in degrees
     }
     if os.path.exists(APP_CONFIG):
         try:

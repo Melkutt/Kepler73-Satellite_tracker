@@ -273,7 +273,7 @@ def fetch_url_source(url: str, timeout: float = URL_TIMEOUT) -> dict:
     Returns {source, kind, ok, count, error}."""
     res = {"source": url, "kind": "url", "ok": False, "count": 0, "error": ""}
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.4"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.5"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             raw = r.read(URL_MAX_BYTES + 1)
         if len(raw) > URL_MAX_BYTES:

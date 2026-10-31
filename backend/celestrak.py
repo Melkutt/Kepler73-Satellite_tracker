@@ -72,7 +72,7 @@ def fetch_group(group: str) -> int | None:
     from backend.tle_sources import parse_gp_json   # local import: no cycle at load time
     url = f"{CELESTRAK_URL}?GROUP={group}&FORMAT=JSON"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.4"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.5"})
         with urllib.request.urlopen(req, timeout=BULK_TIMEOUT) as r:
             raw = r.read()
 
@@ -131,7 +131,7 @@ def _fetch_json(norad_id: str) -> tuple | None:
     url = f"{CELESTRAK_URL}?CATNR={norad_id}&FORMAT=JSON"
     try:
         req = urllib.request.Request(
-            url, headers={"User-Agent": "Kepler73/0.4"})
+            url, headers={"User-Agent": "Kepler73/0.5"})
         with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as r:
             raw = r.read()
 
@@ -164,7 +164,7 @@ def _fetch_tle_legacy(norad_id: str) -> tuple | None:
     url = f"{CELESTRAK_URL}?CATNR={norad_id}&FORMAT=TLE"
     try:
         req = urllib.request.Request(
-            url, headers={"User-Agent": "Kepler73/0.4"})
+            url, headers={"User-Agent": "Kepler73/0.5"})
         with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as r:
             text = r.read().decode("utf-8")
 
@@ -268,7 +268,7 @@ def search_tle(query: str) -> list:
 
     try:
         req = urllib.request.Request(
-            url, headers={"User-Agent": "Kepler73/0.4"})
+            url, headers={"User-Agent": "Kepler73/0.5"})
         with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as r:
             data = json.loads(r.read())
 
@@ -323,7 +323,7 @@ def lookup_satcat(norad_id: str) -> dict | None:
         return None
     url = f"{SATCAT_URL}?CATNR={norad_id}&FORMAT=JSON"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.4"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Kepler73/0.5"})
         with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT) as r:
             data = json.loads(r.read())
         if isinstance(data, list) and data:
